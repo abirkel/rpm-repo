@@ -215,8 +215,18 @@ jobs:
       - name: Verify RPM signature
         env:
           RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+          KEY_ID: ${{ steps.setup_gpg.outputs.key_id }}
         run: |
           echo "Verifying signature on: $RPM_FILE"
+          
+          # Export public key and import it into RPM keyring
+          echo "Importing public key into RPM keyring..."
+          gpg --export -a "$KEY_ID" | sudo rpm --import -
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to import public key into RPM keyring"
+            exit 1
+          fi
           
           # Run rpm --checksig to verify the signature
           CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
