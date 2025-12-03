@@ -379,6 +379,12 @@ jobs:
           echo "Generated metadata files:"
           ls -lh "$TARGET_DIR/repodata/"
       
+      - name: Clean up artifact directory
+        run: |
+          echo "Cleaning up artifact directory..."
+          rm -rf ./artifact
+          echo "✓ Artifact directory removed"
+      
       - name: Generate HTML directory listings
         uses: jayanta525/github-pages-directory-listing@v4.0.0
         with:
