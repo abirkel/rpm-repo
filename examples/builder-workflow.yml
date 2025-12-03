@@ -1,0 +1,223 @@
+---
+# Example Builder Repository Workflow
+#
+# This workflow demonstrates how to build an RPM package and publish it
+# to the central RPM repository with automated GPG signing.
+#
+# Copy this file to your builder repository at:
+# .github/workflows/build-and-publish.yml
+#
+# Then customize the build steps for your specific package.
+
+name: Build and Publish RPM
+
+# Trigger the workflow on:
+# - Push to tags matching v* (e.g., v1.0.0, v2.1.3)
+# - Manual workflow dispatch for testing
+'on':
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  # Job 1: Build the RPM package
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out your repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up the RPM build environment
+      # Install necessary tools for building RPMs
+      - name: Set up RPM build environment
+        run: |
+          sudo dnf install -y rpm-build rpmdevtools
+          rpmdev-setuptree
+
+      # Step 3: Prepare version information
+      # Extract version from tag or use manual input
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      # Step 4: Prepare build files
+      # Copy your spec file and source files to the RPM build tree
+      - name: Prepare build files
+        run: |
+          # Copy spec file to SPECS directory
+          cp mypackage.spec ~/rpmbuild/SPECS/
+
+          # Copy source files to SOURCES directory
+          # Adjust this based on your package structure
+          cp -r src/* ~/rpmbuild/SOURCES/
+
+          # If you have a tarball, copy it instead:
+          # cp mypackage-${{ steps.version.outputs.VERSION }}.tar.gz \
+          #   ~/rpmbuild/SOURCES/
+
+      # Step 5: Build the RPM
+      # This creates both source and binary RPMs
+      - name: Build RPM
+        run: |
+          # Build the RPM package
+          # -ba: build both binary and source RPMs
+          # -bb: build only binary RPM (use if you don't need source)
+          rpmbuild -ba ~/rpmbuild/SPECS/mypackage.spec \
+            --define "version ${{ steps.version.outputs.VERSION }}"
+
+      # Step 6: List built RPMs (for debugging)
+      - name: List built RPMs
+        run: |
+          echo "Built RPMs:"
+          find ~/rpmbuild/RPMS -name "*.rpm" -type f
+
+      # Step 7: Upload the RPM as an artifact
+      # This makes the RPM available to the publish jobs
+      # IMPORTANT: The artifact name must match rpm_artifact_name
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypackage-rpm
+          path: ~/rpmbuild/RPMS/x86_64/*.rpm
+          retention-days: 1  # Artifacts are deleted after 1 day
+          if-no-files-found: error
+
+  # Job 2: Publish to Fedora 41 x86_64
+  # This job calls the central repository's reusable workflow
+  publish-fedora-41:
+    needs: build  # Wait for build job to complete
+
+    # Call the reusable workflow from the central repository
+    # Replace [OWNER] with the GitHub username/org that owns rpm-repo
+    # Replace [REPO] with the repository name (e.g., rpm-repo)
+    uses: OWNER/REPO/.github/workflows/publish-rpm.yml@main
+
+    with:
+      # Name of the artifact uploaded in the build job
+      # MUST match the name in upload-artifact step
+      rpm_artifact_name: mypackage-rpm
+
+      # Distribution name (fedora, rhel, etc.)
+      distro: fedora
+
+      # Release version - MUST be a string (use quotes)
+      release: "41"
+
+      # Architecture - must match the RPM architecture
+      arch: x86_64
+
+    # Pass secrets from this repository to the called workflow
+    # The central repository needs its own secrets (GPG keys)
+    # Your builder repository doesn't need any secrets
+    secrets: inherit
+
+  # Job 3: Publish to Fedora 40 x86_64
+  # Publish the same RPM to a different distribution
+  publish-fedora-40:
+    needs: build
+    uses: OWNER/REPO/.github/workflows/publish-rpm.yml@main
+    with:
+      rpm_artifact_name: mypackage-rpm
+      distro: fedora
+      release: "40"
+      arch: x86_64
+    secrets: inherit
+
+  # Job 4: Publish to Fedora Rawhide x86_64
+  # Rawhide is Fedora's development branch
+  publish-fedora-rawhide:
+    needs: build
+    uses: OWNER/REPO/.github/workflows/publish-rpm.yml@main
+    with:
+      rpm_artifact_name: mypackage-rpm
+      distro: fedora
+      release: rawhide
+      arch: x86_64
+    secrets: inherit
+
+# Optional Job 5: Publish to multiple architectures
+# If you build for multiple architectures, add separate publish jobs
+# publish-fedora-41-aarch64:
+#   needs: build
+#   uses: OWNER/REPO/.github/workflows/publish-rpm.yml@main
+#   with:
+#     rpm_artifact_name: mypackage-rpm-aarch64
+#     distro: fedora
+#     release: "41"
+#     arch: aarch64
+#   secrets: inherit
+
+# Customization Notes:
+#
+# 1. Replace [OWNER] and [REPO] with actual values:
+#    - Example: myusername/rpm-repo
+#
+# 2. Adjust the build steps for your package:
+#    - Modify the "Prepare build files" step
+#    - Update paths to your spec file and sources
+#    - Add any additional build dependencies
+#
+# 3. Update artifact names if building multiple packages:
+#    - Use unique names for each package/architecture
+#    - Ensure names match between upload and publish jobs
+#
+# 4. Choose which distributions to publish to:
+#    - Remove publish jobs for unsupported distributions
+#    - Add jobs for additional distributions as needed
+#
+# 5. Adjust trigger conditions:
+#    - Change tag pattern if using different versioning
+#    - Add branch triggers for development builds
+#    - Modify workflow_dispatch inputs as needed
+#
+# 6. Set appropriate artifact retention:
+#    - Default is 1 day (sufficient for immediate publishing)
+#    - Increase if you need artifacts for longer
+#    - Consider storage costs for longer retention
+#
+# Testing:
+#
+# 1. Test locally first:
+#    rpmbuild -ba mypackage.spec
+#
+# 2. Test the workflow with workflow_dispatch:
+#    - Go to Actions tab in GitHub
+#    - Select "Build and Publish RPM"
+#    - Click "Run workflow"
+#    - Enter a test version
+#
+# 3. Create a test tag:
+#    git tag v0.1.0-test
+#    git push origin v0.1.0-test
+#
+# 4. Monitor the workflow:
+#    - Check Actions tab for progress
+#    - Review logs if any step fails
+#    - Verify RPM appears in central repository
+#
+# 5. Test installation:
+#    sudo dnf install mypackage
+#
+# Troubleshooting:
+#
+# - If artifact upload fails: Check that RPMs were built successfully
+# - If publish fails: Verify [OWNER]/[REPO] values are correct
+# - If signing fails: Check central repository's GPG secrets
+# - If installation fails: Verify GPG key is imported
+#
+# For more help, see CONTRIBUTING.md in the central repository.

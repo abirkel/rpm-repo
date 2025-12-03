@@ -1,0 +1,6 @@
+[rpm-repo-testing-fedora-$releasever]
+name=AB RPM Repository - Testing - Fedora $releasever - $basearch
+baseurl=https://[owner].github.io/rpm-repo/repo/fedora/$releasever/$basearch/testing
+enabled=0
+gpgcheck=1
+gpgkey=https://[owner].github.io/rpm-repo/repo/public.gpg
