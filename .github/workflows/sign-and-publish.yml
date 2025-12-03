@@ -140,6 +140,7 @@ jobs:
           echo "RPM filename: $RPM_FILENAME"
       
       - name: Setup GPG and sign RPM
+        id: setup_gpg
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PRIVATE_KEY_PASS: ${{ secrets.GPG_PRIVATE_KEY_PASS }}
@@ -175,13 +176,13 @@ jobs:
           gpg-connect-agent reloadagent /bye || true
           
           # Create .rpmmacros file with signing configuration
-          cat > ~/.rpmmacros << EOF
-%_signature gpg
-%_gpg_name $KEY_ID
-%__gpg /usr/bin/gpg
-%_gpg_digest_algo sha256
-EOF
-          
+          {
+            echo "%_signature gpg"
+            echo "%_gpg_name $KEY_ID"
+            echo "%__gpg /usr/bin/gpg"
+            echo "%_gpg_digest_algo sha256"
+          } > ~/.rpmmacros
+
           # Write passphrase to secure temporary file
           PASSPHRASE_FILE=$(mktemp)
           chmod 600 "$PASSPHRASE_FILE"
