@@ -111,9 +111,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Installing createrepo_c and rpmdevtools..."
+          echo "Installing createrepo_c and rpm tools..."
           sudo apt-get update -qq || true
-          sudo apt-get install -y createrepo-c rpmdevtools libxml2-utils
+          sudo apt-get install -y createrepo-c rpm libxml2-utils
 
           echo "✓ Tools installed"
 
