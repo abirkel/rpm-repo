@@ -1,52 +1,54 @@
-# rpm-repo
+# RPM Repository Automation
 
 ![Repo Type](https://img.shields.io/badge/type-rpm_repository-blue)
 ![Signing](https://img.shields.io/badge/signing-GPG-green)
 ![Automation](https://img.shields.io/badge/ci-github_actions-yellow)
+![Pages](https://img.shields.io/badge/hosted-github_pages-blue)
 
-**rpm-repo** is the central signing and publishing repository for all RPM packages built across my GitHub projects.
+A centralized RPM repository that provides automated GPG signing and publishing for my project packages.
 
-Builder repositories produce unsigned RPMs → this repository signs them with a trusted GPG key → then publishes them to a structured `gh-pages` RPM repository with incremental metadata updates.
+## Purpose
 
-This repository contains:
-- A **reusable GitHub Actions workflow** for signing & publishing RPMs  
-- A **composite GitHub Action** used internally by the workflow  
-- A public-facing **RPM repository** at: **https://abirkel.github.io/rpm-repo/**  
-- The **public GPG key** used for verifying signatures
+This repository serves as a central hub for signing and publishing RPM packages:
+
+- **Builder repositories** produce unsigned RPM packages and trigger workflows in this repository
+- **This repository** downloads artifacts, signs RPMs with a trusted GPG key, and publishes them to GitHub Pages
+- **End users** install packages from the public repository with verified GPG signatures
 
 ## Installing Packages
 
-1. Download the repository configuration:
+### 1. Add the Repository
+
+For **stable** packages (recommended):
 
 ```bash
 sudo curl -o /etc/yum.repos.d/rpm-repo.repo \
-  https://abirkel.github.io/rpm-repo/repo/rpm-repo.repo
+  https://abirkel.github.io/rpm-repo/stable.repo
 ```
 
-2. Import the GPG public key:
+For **testing** packages:
 
 ```bash
-sudo rpm --import https://abirkel.github.io/rpm-repo/repo/public.gpg
+sudo curl -o /etc/yum.repos.d/rpm-repo-testing.repo \
+  https://abirkel.github.io/rpm-repo/testing.repo
 ```
 
-3. Install packages:
+### 2. Install Packages
 
 ```bash
 sudo dnf install <package-name>
 ```
 
-## Repository Structure
+### 3. Browse Available Packages
+
+Visit the repository in your browser:
 
 ```
-├── fedora/
-│   ├── 43/x86_64/
-│   │   ├── repodata/
-│   │   └── *.rpm
-│   └── [other releases]/
-├── public.gpg
-└── rpm-repo.repo
+https://abirkel.github.io/rpm-repo/
 ```
 
-## Integration
+Navigate through the directory structure to see available packages organized by distribution, release, architecture, and build type.
 
-See [INTEGRATION.md](INTEGRATION.md) for instructions on integrating builder repositories with this central signing repository.
+## Builder Integration
+
+See [INTEGRATION.md](INTEGRATION.md) for instructions on integrating builder repositories with this central signing and publishing repository.
