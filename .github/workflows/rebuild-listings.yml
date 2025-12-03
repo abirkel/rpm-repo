@@ -1,0 +1,102 @@
+name: Rebuild Directory Listings
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: 'Custom commit message (optional)'
+        required: false
+        default: 'Rebuild HTML directory listings'
+
+jobs:
+  rebuild-listings:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+      
+      - name: Generate directory listings
+        run: |
+          # Function to generate HTML listing for a directory
+          generate_listing() {
+            local dir="$1"
+            local index_file="$dir/index.html"
+            
+            echo "Generating listing for: $dir"
+            
+            cat > "$index_file" << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Directory Listing</title>
+            <style>
+              body { font-family: monospace; margin: 20px; }
+              a { text-decoration: none; color: #0066cc; }
+              a:hover { text-decoration: underline; }
+              .dir { font-weight: bold; }
+              .file { color: #333; }
+              table { border-collapse: collapse; }
+              td { padding: 4px 12px; }
+              tr:hover { background-color: #f5f5f5; }
+            </style>
+          </head>
+          <body>
+            <h1>Index of $(realpath --relative-to=. "$dir")</h1>
+            <table>
+          EOF
+            
+            # Parent directory link
+            if [ "$dir" != "." ]; then
+              echo '<tr><td class="dir">📁</td><td><a href="../">../</a></td></tr>' >> "$index_file"
+            fi
+            
+            # List directories first
+            find "$dir" -maxdepth 1 -type d ! -path "$dir" ! -name "repodata" -printf '%f\n' | sort | while read -r item; do
+              echo "<tr><td class=\"dir\">📁</td><td><a href=\"$item/\">$item/</a></td></tr>" >> "$index_file"
+            done
+            
+            # List files
+            find "$dir" -maxdepth 1 -type f ! -name "index.html" -printf '%f\n' | sort | while read -r item; do
+              echo "<tr><td class=\"file\">📄</td><td><a href=\"$item\">$item</a></td></tr>" >> "$index_file"
+            done
+            
+            cat >> "$index_file" << 'EOF'
+            </table>
+          </body>
+          </html>
+          EOF
+          }
+          
+          # Remove all existing index.html files
+          echo "Removing existing directory listings..."
+          find . -name "index.html" -type f -delete
+          
+          # Generate listings for all directories
+          echo "Generating new directory listings..."
+          find . -type d ! -path "*/.git/*" ! -path "*/repodata" | while read -r dir; do
+            generate_listing "$dir"
+          done
+          
+          echo "Directory listing generation complete"
+      
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "${{ github.event.inputs.commit_message }}"
+            git push
+            echo "Directory listings rebuilt and pushed successfully"
+          fi
