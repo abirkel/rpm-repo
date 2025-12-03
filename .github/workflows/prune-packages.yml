@@ -1,0 +1,443 @@
+---
+name: Prune Old Packages
+
+'on':
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout gh-pages branch
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0  # Need full history for proper version comparison
+
+      # Step 2: Sparse checkout of prune-config.yml from main branch
+      - name: Fetch prune configuration from main branch
+        run: |
+          set -euo pipefail
+
+          echo "Fetching prune-config.yml from main branch..."
+
+          # Fetch main branch
+          git fetch origin main
+
+          # Extract prune-config.yml from main branch
+          if git show origin/main:.github/prune-config.yml > /tmp/prune-config.yml 2>/dev/null; then
+            mkdir -p .github
+            mv /tmp/prune-config.yml .github/prune-config.yml
+            echo "✓ Configuration loaded from main branch"
+          else
+            echo "::warning::No prune-config.yml found in main branch"
+            echo "::warning::Will use default values"
+          fi
+
+      # Step 3: Load pruning configuration
+      - name: Load pruning configuration
+        id: config
+        run: |
+          set -euo pipefail
+
+          # Default values
+          MAX_BRANCHES=2
+          MAX_VERSIONS_STABLE=5
+          MAX_VERSIONS_TESTING=3
+
+          # Load from config file if it exists
+          if [ -f ".github/prune-config.yml" ]; then
+            echo "Loading configuration from .github/prune-config.yml"
+
+            # Parse YAML config
+            # Strip carriage returns for Windows compatibility
+            if grep -q "^max_branches:" .github/prune-config.yml; then
+              MAX_BRANCHES=$(grep "^max_branches:" .github/prune-config.yml | \
+                  awk '{print $2}' | tr -d '\r')
+            fi
+
+            # Parse max_versions for stable
+            if grep -A1 "^max_versions:" .github/prune-config.yml | grep -q "stable:"; then
+              MAX_VERSIONS_STABLE=$(grep -A1 "^max_versions:" .github/prune-config.yml | \
+                  grep "stable:" | awk '{print $2}' | tr -d '\r')
+            fi
+
+            # Parse max_versions for testing
+            if grep -A2 "^max_versions:" .github/prune-config.yml | grep -q "testing:"; then
+              MAX_VERSIONS_TESTING=$(grep -A2 "^max_versions:" .github/prune-config.yml | \
+                  grep "testing:" | awk '{print $2}' | tr -d '\r')
+            fi
+
+            # Validate configuration values
+            if ! [[ "$MAX_BRANCHES" =~ ^[0-9]+$ ]] || [ "$MAX_BRANCHES" -lt 1 ]; then
+              echo "::error::Invalid max_branches value: $MAX_BRANCHES"
+              echo "::error::Must be a positive integer"
+              exit 1
+            fi
+
+            if ! [[ "$MAX_VERSIONS_STABLE" =~ ^[0-9]+$ ]] || [ "$MAX_VERSIONS_STABLE" -lt 1 ]; then
+              echo "::error::Invalid max_versions.stable value: $MAX_VERSIONS_STABLE"
+              echo "::error::Must be a positive integer"
+              exit 1
+            fi
+
+            if ! [[ "$MAX_VERSIONS_TESTING" =~ ^[0-9]+$ ]] || [ "$MAX_VERSIONS_TESTING" -lt 1 ]; then
+              echo "::error::Invalid max_versions.testing value: $MAX_VERSIONS_TESTING"
+              echo "::error::Must be a positive integer"
+              exit 1
+            fi
+          else
+            echo "No configuration file found, using defaults"
+          fi
+
+          echo "Configuration:"
+          echo "  max_branches: $MAX_BRANCHES"
+          echo "  max_versions.stable: $MAX_VERSIONS_STABLE"
+          echo "  max_versions.testing: $MAX_VERSIONS_TESTING"
+
+          echo "MAX_BRANCHES=$MAX_BRANCHES" >> $GITHUB_OUTPUT
+          echo "MAX_VERSIONS_STABLE=$MAX_VERSIONS_STABLE" >> $GITHUB_OUTPUT
+          echo "MAX_VERSIONS_TESTING=$MAX_VERSIONS_TESTING" >> $GITHUB_OUTPUT
+
+      # Step 4: Install required tools
+      - name: Install required tools
+        run: |
+          set -euo pipefail
+
+          echo "Installing createrepo_c and rpmdevtools..."
+          sudo apt-get update -qq
+          sudo apt-get install -y createrepo-c rpmdevtools libxml2-utils
+
+          echo "✓ Tools installed"
+
+      # Step 5: Prune old distribution branches
+      - name: Prune old distribution branches
+        id: prune_branches
+        run: |
+          set -euo pipefail
+
+          MAX_BRANCHES="${{ steps.config.outputs.MAX_BRANCHES }}"
+          PRUNED_BRANCHES=""
+
+          # Find all distributions (no root repo/ folder)
+          DISTROS=($(find . -mindepth 1 -maxdepth 1 -type d -not -name ".*" -not -name "*.repo" -not -name "*.gpg" 2>/dev/null | sed 's|^\./||' || true))
+
+          if [ ${#DISTROS[@]} -eq 0 ]; then
+            echo "::warning::No distribution directories found, nothing to prune"
+            exit 0
+          fi
+
+          for DISTRO in "${DISTROS[@]}"; do
+            if [ ! -d "$DISTRO" ]; then
+              continue
+            fi
+
+            echo "Processing distribution: $DISTRO"
+
+            # Find all release branches for this distribution
+            BRANCHES=()
+            for RELEASE_DIR in "$DISTRO"/*/; do
+              if [ ! -d "$RELEASE_DIR" ]; then
+                continue
+              fi
+
+              RELEASE=$(basename "$RELEASE_DIR")
+              BRANCHES+=("$RELEASE")
+            done
+
+            # Check if we have branches to process
+            if [ ${#BRANCHES[@]} -eq 0 ]; then
+              echo "  No branches found for $DISTRO"
+              continue
+            fi
+
+            echo "  Found ${#BRANCHES[@]} branches: ${BRANCHES[*]}"
+
+            # Sort branches in descending order (newest first)
+            # Use version sort to handle both numeric and non-numeric releases
+            IFS=$'\n' SORTED_BRANCHES=($(printf '%s\n' "${BRANCHES[@]}" | sort -V -r))
+            unset IFS
+
+            echo "  Sorted branches: ${SORTED_BRANCHES[*]}"
+
+            # Determine which branches to keep and which to remove
+            KEEP_COUNT=$MAX_BRANCHES
+            BRANCHES_TO_REMOVE=()
+
+            for i in "${!SORTED_BRANCHES[@]}"; do
+              BRANCH="${SORTED_BRANCHES[$i]}"
+
+              if [ $i -lt $KEEP_COUNT ]; then
+                echo "  ✓ Keeping: $DISTRO/$BRANCH"
+              else
+                echo "  ✗ Removing: $DISTRO/$BRANCH"
+                BRANCHES_TO_REMOVE+=("$DISTRO/$BRANCH")
+              fi
+            done
+
+            # Remove old branches
+            for BRANCH_PATH in "${BRANCHES_TO_REMOVE[@]}"; do
+              if [ -d "$BRANCH_PATH" ]; then
+                echo "  Removing directory: $BRANCH_PATH"
+                rm -rf "$BRANCH_PATH"
+                PRUNED_BRANCHES="$PRUNED_BRANCHES $BRANCH_PATH"
+              fi
+            done
+          done
+
+          # Save pruned branches for commit message
+          echo "PRUNED_BRANCHES=$PRUNED_BRANCHES" >> $GITHUB_OUTPUT
+
+          if [ -n "$PRUNED_BRANCHES" ]; then
+            echo "✓ Pruned branches:$PRUNED_BRANCHES"
+          else
+            echo "✓ No branches needed pruning"
+          fi
+
+      # Step 6: Prune old package versions within remaining branches
+      - name: Prune old package versions
+        id: prune_versions
+        run: |
+          set -euo pipefail
+
+          MAX_VERSIONS_STABLE="${{ steps.config.outputs.MAX_VERSIONS_STABLE }}"
+          MAX_VERSIONS_TESTING="${{ steps.config.outputs.MAX_VERSIONS_TESTING }}"
+          PRUNED_PACKAGES=""
+
+          # Process each distribution/release/arch/build_type combination
+          for BUILD_TYPE_DIR in */*/*/*/; do
+            if [ ! -d "$BUILD_TYPE_DIR" ]; then
+              continue
+            fi
+
+            # Extract distro/release/arch/build_type from path
+            BUILD_TYPE_DIR_CLEAN="${BUILD_TYPE_DIR%/}"
+            BUILD_TYPE=$(basename "$BUILD_TYPE_DIR_CLEAN")
+            ARCH_DIR=$(dirname "$BUILD_TYPE_DIR_CLEAN")
+            ARCH=$(basename "$ARCH_DIR")
+            RELEASE_DIR=$(dirname "$ARCH_DIR")
+            RELEASE=$(basename "$RELEASE_DIR")
+            DISTRO_DIR=$(dirname "$RELEASE_DIR")
+            DISTRO=$(basename "$DISTRO_DIR")
+
+            # Determine max versions for this build type
+            if [ "$BUILD_TYPE" = "stable" ]; then
+              MAX_VERSIONS=$MAX_VERSIONS_STABLE
+            elif [ "$BUILD_TYPE" = "testing" ]; then
+              MAX_VERSIONS=$MAX_VERSIONS_TESTING
+            else
+              echo "  ::warning::Unknown build_type: $BUILD_TYPE, skipping"
+              continue
+            fi
+
+            echo "Processing: $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE (max: $MAX_VERSIONS)"
+
+            # Find all RPM files
+            RPM_FILES=($(find "$BUILD_TYPE_DIR_CLEAN" -maxdepth 1 -name "*.rpm" -type f 2>/dev/null || true))
+
+            if [ ${#RPM_FILES[@]} -eq 0 ]; then
+              echo "  No RPM files found"
+              continue
+            fi
+
+            echo "  Found ${#RPM_FILES[@]} RPM files"
+
+            # Group packages by name
+            declare -A PACKAGE_GROUPS
+
+            for RPM_FILE in "${RPM_FILES[@]}"; do
+              RPM_NAME=$(basename "$RPM_FILE")
+
+              # Extract package name
+              PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" 2>/dev/null || echo "unknown")
+
+              if [ "$PKG_NAME" = "unknown" ]; then
+                echo "  ::warning::Could not determine package name for $RPM_NAME"
+                continue
+              fi
+
+              # Add to group
+              if [ -z "${PACKAGE_GROUPS[$PKG_NAME]:-}" ]; then
+                PACKAGE_GROUPS[$PKG_NAME]="$RPM_FILE"
+              else
+                PACKAGE_GROUPS[$PKG_NAME]="${PACKAGE_GROUPS[$PKG_NAME]} $RPM_FILE"
+              fi
+            done
+
+            # Process each package group
+            for PKG_NAME in "${!PACKAGE_GROUPS[@]}"; do
+              # Get all versions of this package
+              PKG_FILES=(${PACKAGE_GROUPS[$PKG_NAME]})
+
+              if [ ${#PKG_FILES[@]} -le $MAX_VERSIONS ]; then
+                echo "  ✓ $PKG_NAME: ${#PKG_FILES[@]} versions (within limit)"
+                continue
+              fi
+
+              echo "  Processing $PKG_NAME: ${#PKG_FILES[@]} versions (limit: $MAX_VERSIONS)"
+
+              # Sort versions using RPM version comparison
+              SORTED_FILES=()
+
+              # Create a temporary file with version info
+              TEMP_FILE=$(mktemp)
+              for PKG_FILE in "${PKG_FILES[@]}"; do
+                VERSION=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$PKG_FILE" 2>/dev/null || echo "0-0")
+                echo "$VERSION $PKG_FILE" >> "$TEMP_FILE"
+              done
+
+              # Sort by version (descending) and extract file paths
+              while IFS= read -r line; do
+                FILE_PATH=$(echo "$line" | cut -d' ' -f2-)
+                SORTED_FILES+=("$FILE_PATH")
+              done < <(sort -t' ' -k1,1V -r "$TEMP_FILE")
+
+              rm -f "$TEMP_FILE"
+
+              # Keep only MAX_VERSIONS newest versions
+              for i in "${!SORTED_FILES[@]}"; do
+                FILE="${SORTED_FILES[$i]}"
+                FILE_NAME=$(basename "$FILE")
+
+                if [ $i -lt $MAX_VERSIONS ]; then
+                  echo "    ✓ Keeping: $FILE_NAME"
+                else
+                  echo "    ✗ Removing: $FILE_NAME"
+                  rm -f "$FILE"
+                  PRUNED_PACKAGES="$PRUNED_PACKAGES $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE/$FILE_NAME"
+                fi
+              done
+            done
+
+            # Clean up associative array for next iteration
+            unset PACKAGE_GROUPS
+            declare -A PACKAGE_GROUPS
+          done
+
+          # Save pruned packages for commit message
+          echo "PRUNED_PACKAGES=$PRUNED_PACKAGES" >> $GITHUB_OUTPUT
+
+          if [ -n "$PRUNED_PACKAGES" ]; then
+            echo "✓ Pruned packages:$PRUNED_PACKAGES"
+          else
+            echo "✓ No packages needed pruning"
+          fi
+
+      # Step 7: Update metadata for all affected directories
+      - name: Update repository metadata
+        run: |
+          set -euo pipefail
+
+          echo "Updating repository metadata..."
+
+          # Update metadata for all remaining build_type directories
+          for BUILD_TYPE_DIR in */*/*/*/; do
+            if [ ! -d "$BUILD_TYPE_DIR" ]; then
+              continue
+            fi
+
+            BUILD_TYPE_DIR_CLEAN="${BUILD_TYPE_DIR%/}"
+
+            # Check if directory has any RPM files
+            RPM_COUNT=$(find "$BUILD_TYPE_DIR_CLEAN" -maxdepth 1 -name "*.rpm" -type f 2>/dev/null | wc -l)
+
+            if [ $RPM_COUNT -eq 0 ]; then
+              echo "  Skipping $BUILD_TYPE_DIR_CLEAN (no RPM files)"
+              continue
+            fi
+
+            echo "  Updating metadata: $BUILD_TYPE_DIR_CLEAN"
+
+            # Run createrepo_c
+            if createrepo_c --update "$BUILD_TYPE_DIR_CLEAN" 2>&1; then
+              echo "    ✓ Metadata updated"
+            else
+              echo "::error::Failed to update metadata for $BUILD_TYPE_DIR_CLEAN"
+              exit 1
+            fi
+
+            # Validate generated metadata
+            if [ -f "$BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml" ]; then
+              if xmllint --noout "$BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml" 2>&1; then
+                echo "    ✓ Metadata validated"
+              else
+                echo "::error::Invalid metadata XML in $BUILD_TYPE_DIR_CLEAN"
+                exit 1
+              fi
+            else
+              echo "::error::Metadata file not found: $BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml"
+              exit 1
+            fi
+          done
+
+          echo "✓ All metadata updated and validated"
+
+      # Step 8: Regenerate HTML indexes
+      - name: Regenerate HTML indexes
+        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        with:
+          FOLDER: .
+
+      # Step 9: Commit and push changes
+      - name: Commit and push pruning changes
+        run: |
+          set -euo pipefail
+
+          PRUNED_BRANCHES="${{ steps.prune_branches.outputs.PRUNED_BRANCHES }}"
+          PRUNED_PACKAGES="${{ steps.prune_versions.outputs.PRUNED_PACKAGES }}"
+
+          # Configure Git user
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage all changes
+          git add .
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "::notice::No changes to commit - nothing was pruned"
+            exit 0
+          fi
+
+          # Build commit message
+          COMMIT_MSG="Pruned old packages and branches"
+
+          if [ -n "$PRUNED_BRANCHES" ]; then
+            COMMIT_MSG="$COMMIT_MSG"$'\n'"Pruned branches:$PRUNED_BRANCHES"
+          fi
+
+          if [ -n "$PRUNED_PACKAGES" ]; then
+            # Truncate package list if too long
+            PACKAGE_COUNT=$(echo "$PRUNED_PACKAGES" | wc -w)
+            if [ $PACKAGE_COUNT -gt 20 ]; then
+              PRUNED_PACKAGES_SAMPLE=$(echo "$PRUNED_PACKAGES" | tr ' ' '\n' | head -20 | tr '\n' ' ')
+              REMAINING=$((PACKAGE_COUNT - 20))
+              COMMIT_MSG="$COMMIT_MSG"$'\n'"Pruned $PACKAGE_COUNT packages (showing first 20):"
+              COMMIT_MSG="$COMMIT_MSG"$'\n'"$PRUNED_PACKAGES_SAMPLE"
+              COMMIT_MSG="$COMMIT_MSG"$'\n'"... and $REMAINING more"
+            else
+              COMMIT_MSG="$COMMIT_MSG"$'\n'"Pruned packages:$PRUNED_PACKAGES"
+            fi
+          fi
+
+          # Show what will be committed
+          echo "Changes to be committed:"
+          git diff --staged --stat
+
+          echo ""
+          echo "Commit message:"
+          echo "$COMMIT_MSG"
+
+          # Commit changes
+          git commit -m "$COMMIT_MSG"
+
+          # Push to gh-pages branch
+          git push origin gh-pages
+          echo "✓ Successfully pushed pruning changes"

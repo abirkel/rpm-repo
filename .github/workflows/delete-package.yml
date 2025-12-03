@@ -381,37 +381,11 @@ jobs:
           echo "$COMMIT_MSG"
 
           # Commit changes
-          if ! git commit -m "$COMMIT_MSG"; then
-            echo "::error::Failed to commit changes"
-            exit 1
-          fi
+          git commit -m "$COMMIT_MSG"
 
-          # Push to gh-pages branch with retry logic
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            if git push origin gh-pages; then
-              echo "✓ Successfully pushed changes"
-              exit 0
-            fi
-
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "::warning::Push failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
-              sleep 2
-
-              # Try to pull and rebase in case of conflicts
-              if git pull --rebase origin gh-pages; then
-                echo "Rebased on latest gh-pages"
-              else
-                echo "::warning::Failed to rebase, will retry anyway"
-              fi
-            fi
-          done
-
-          echo "::error::Failed to push changes after $MAX_RETRIES attempts"
-          exit 1
+          # Push to gh-pages branch
+          git push origin gh-pages
+          echo "✓ Successfully pushed changes"
 
       # Step 10: Summary
       - name: Summary
