@@ -241,8 +241,10 @@ jobs:
           rm -f /tmp/public_key.asc
           
           # Run rpm --checksig to verify the signature
+          set +e
           CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
           CHECKSIG_RESULT=$?
+          set -e
           
           echo "Signature check output:"
           echo "$CHECKSIG_OUTPUT"
