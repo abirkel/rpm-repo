@@ -385,10 +385,23 @@ jobs:
           rm -rf ./artifact
           echo "✓ Artifact directory removed"
       
+      - name: Prepare for HTML generation
+        run: |
+          echo "Hiding .git directory temporarily..."
+          mv .git .git-hidden
+          echo "✓ .git directory hidden"
+      
       - name: Generate HTML directory listings
         uses: jayanta525/github-pages-directory-listing@v4.0.0
         with:
           FOLDER: .
+      
+      - name: Restore .git directory
+        if: always()
+        run: |
+          echo "Restoring .git directory..."
+          mv .git-hidden .git
+          echo "✓ .git directory restored"
       
       - name: Verify HTML index generation
         run: |
