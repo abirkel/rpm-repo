@@ -1,0 +1,6 @@
+[rpm-repo-stable-fedora-$releasever]
+name=AB RPM Repository - Stable - Fedora $releasever - $basearch
+baseurl=https://[owner].github.io/rpm-repo/fedora/$releasever/$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://[owner].github.io/rpm-repo/public.gpg

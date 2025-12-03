@@ -1,0 +1,48 @@
+# Sensitive files
+GPG_PRIVATE_KEY
+GPG_PRIVATE_KEY_PASS
+GPG_KEY_ID
+*.key
+*.asc
+
+# Build artifacts
+*.rpm
+*.tar.gz
+*.tar.bz2
+*.zip
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.DS_Store
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.kiro/
+scripts/
+gh_pages/
+
+# Node modules (if using Node.js for testing)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+env/
+
+# GitHub Actions
+.github/workflows/*.log
+
+# Repository metadata (generated)
+repo/*/repodata/
