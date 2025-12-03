@@ -217,10 +217,19 @@ jobs:
           RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
           KEY_ID: ${{ steps.setup_gpg.outputs.key_id }}
         run: |
-          echo "Verifying signature on: $RPM_FILE"
+          echo "=== RPM Signature Verification ==="
+          echo "RPM file: $RPM_FILE"
+          echo "Key ID: $KEY_ID"
+          
+          # Check RPM file before verification
+          echo ""
+          echo "RPM file info:"
+          ls -lh "$RPM_FILE"
+          file "$RPM_FILE"
           
           # Export public key and import it into RPM keyring
-          echo "Importing public key into RPM keyring..."
+          echo ""
+          echo "Exporting public key..."
           gpg --export -a "$KEY_ID" > /tmp/public_key.asc
           
           if [ ! -s /tmp/public_key.asc ]; then
@@ -228,40 +237,54 @@ jobs:
             exit 1
           fi
           
-          echo "Public key exported, size: $(wc -c < /tmp/public_key.asc) bytes"
+          echo "Public key exported successfully ($(wc -c < /tmp/public_key.asc) bytes)"
           
           # Import key into RPM database
+          echo ""
+          echo "Importing public key into RPM keyring..."
           if ! sudo rpm --import /tmp/public_key.asc 2>&1; then
             echo "::error::Failed to import public key into RPM keyring"
+            echo "Public key content:"
             cat /tmp/public_key.asc
             exit 1
           fi
           
-          echo "Public key imported successfully"
+          echo "✓ Public key imported successfully"
+          
+          # List imported keys
+          echo ""
+          echo "Imported RPM keys:"
+          rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{SUMMARY}\n'
+          
           rm -f /tmp/public_key.asc
           
           # Run rpm --checksig to verify the signature
+          echo ""
+          echo "Running rpm --checksig..."
           set +e
           CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
           CHECKSIG_RESULT=$?
           set -e
           
-          echo "Signature check output:"
+          echo "Exit code: $CHECKSIG_RESULT"
+          echo "Output:"
           echo "$CHECKSIG_OUTPUT"
           
           if [ $CHECKSIG_RESULT -ne 0 ]; then
-            echo "::error::RPM signature verification failed with exit code $CHECKSIG_RESULT"
+            echo "::error::rpm --checksig failed with exit code $CHECKSIG_RESULT"
             exit 1
           fi
           
           # Check if the output contains signature information
+          echo ""
+          echo "Analyzing signature output..."
           if echo "$CHECKSIG_OUTPUT" | grep -q "pgp"; then
-            echo "✓ RPM signature verified successfully"
+            echo "✓ PGP signature detected"
           elif echo "$CHECKSIG_OUTPUT" | grep -q "gpg"; then
-            echo "✓ RPM signature verified successfully"
+            echo "✓ GPG signature detected"
           else
             echo "::error::No valid signature found in RPM"
-            echo "::error::Output: $CHECKSIG_OUTPUT"
+            echo "::error::Expected 'pgp' or 'gpg' in output but got: $CHECKSIG_OUTPUT"
             exit 1
           fi
           
@@ -272,7 +295,8 @@ jobs:
             exit 1
           fi
           
-          echo "Signature verification completed successfully"
+          echo ""
+          echo "✓ RPM signature verification completed successfully"
       
       - name: Publish RPM to repository
         id: publish
