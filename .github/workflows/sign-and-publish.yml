@@ -278,13 +278,15 @@ jobs:
           # Check if the output contains signature information
           echo ""
           echo "Analyzing signature output..."
-          if echo "$CHECKSIG_OUTPUT" | grep -q "pgp"; then
+          if echo "$CHECKSIG_OUTPUT" | grep -qi "signatures\? OK"; then
+            echo "✓ RPM signature verified - output contains 'signatures OK'"
+          elif echo "$CHECKSIG_OUTPUT" | grep -q "pgp"; then
             echo "✓ PGP signature detected"
           elif echo "$CHECKSIG_OUTPUT" | grep -q "gpg"; then
             echo "✓ GPG signature detected"
           else
             echo "::error::No valid signature found in RPM"
-            echo "::error::Expected 'pgp' or 'gpg' in output but got: $CHECKSIG_OUTPUT"
+            echo "::error::Expected 'signatures OK', 'pgp', or 'gpg' in output but got: $CHECKSIG_OUTPUT"
             exit 1
           fi
           
