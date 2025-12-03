@@ -21,70 +21,27 @@ jobs:
           ref: gh-pages
           fetch-depth: 1
       
-      - name: Generate directory listings
+      - name: Prepare for HTML generation
         run: |
-          # Function to generate HTML listing for a directory
-          generate_listing() {
-            local dir="$1"
-            local index_file="$dir/index.html"
-            
-            echo "Generating listing for: $dir"
-            
-            cat > "$index_file" << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Directory Listing</title>
-            <style>
-              body { font-family: monospace; margin: 20px; }
-              a { text-decoration: none; color: #0066cc; }
-              a:hover { text-decoration: underline; }
-              .dir { font-weight: bold; }
-              .file { color: #333; }
-              table { border-collapse: collapse; }
-              td { padding: 4px 12px; }
-              tr:hover { background-color: #f5f5f5; }
-            </style>
-          </head>
-          <body>
-            <h1>Index of $(realpath --relative-to=. "$dir")</h1>
-            <table>
-          EOF
-            
-            # Parent directory link
-            if [ "$dir" != "." ]; then
-              echo '<tr><td class="dir">📁</td><td><a href="../">../</a></td></tr>' >> "$index_file"
-            fi
-            
-            # List directories first
-            find "$dir" -maxdepth 1 -type d ! -path "$dir" ! -name "repodata" -printf '%f\n' | sort | while read -r item; do
-              echo "<tr><td class=\"dir\">📁</td><td><a href=\"$item/\">$item/</a></td></tr>" >> "$index_file"
-            done
-            
-            # List files
-            find "$dir" -maxdepth 1 -type f ! -name "index.html" -printf '%f\n' | sort | while read -r item; do
-              echo "<tr><td class=\"file\">📄</td><td><a href=\"$item\">$item</a></td></tr>" >> "$index_file"
-            done
-            
-            cat >> "$index_file" << 'EOF'
-            </table>
-          </body>
-          </html>
-          EOF
-          }
+          echo "Hiding .git directory temporarily..."
+          mv .git .git-hidden
+          echo "✓ .git directory hidden"
           
-          # Remove all existing index.html files
-          echo "Removing existing directory listings..."
+          echo "Removing existing index.html files to force regeneration..."
           find . -name "index.html" -type f -delete
-          
-          # Generate listings for all directories
-          echo "Generating new directory listings..."
-          find . -type d ! -path "*/.git/*" ! -path "*/repodata" | while read -r dir; do
-            generate_listing "$dir"
-          done
-          
-          echo "Directory listing generation complete"
+          echo "✓ Old index.html files removed"
+      
+      - name: Generate HTML directory listings
+        uses: jayanta525/github-pages-directory-listing@v5.0.0
+        with:
+          FOLDER: .
+      
+      - name: Restore .git directory
+        if: always()
+        run: |
+          echo "Restoring .git directory..."
+          mv .git-hidden .git
+          echo "✓ .git directory restored"
       
       - name: Commit and push changes
         run: |

@@ -380,8 +380,14 @@ jobs:
           echo "✓ All metadata updated and validated"
 
       # Step 8: Regenerate HTML indexes
+      - name: Remove old index.html files
+        run: |
+          echo "Removing existing index.html files to force regeneration..."
+          find . -name "index.html" -type f -delete
+          echo "✓ Old index.html files removed"
+      
       - name: Regenerate HTML indexes
-        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        uses: jayanta525/github-pages-directory-listing@v5.0.0
         with:
           FOLDER: .
 

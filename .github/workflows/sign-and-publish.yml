@@ -390,9 +390,13 @@ jobs:
           echo "Hiding .git directory temporarily..."
           mv .git .git-hidden
           echo "✓ .git directory hidden"
+          
+          echo "Removing existing index.html files to force regeneration..."
+          find . -name "index.html" -type f -delete
+          echo "✓ Old index.html files removed"
       
       - name: Generate HTML directory listings
-        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        uses: jayanta525/github-pages-directory-listing@v5.0.0
         with:
           FOLDER: .
       
@@ -426,6 +430,13 @@ jobs:
           echo "Generated index.html files:"
           find . -name "index.html" -type f | head -20
       
+      - name: Remove .gitignore to allow RPM files
+        run: |
+          if [ -f .gitignore ]; then
+            echo "Removing .gitignore from gh-pages to allow RPM files to be committed"
+            rm .gitignore
+          fi
+      
       - name: Commit and push changes
         env:
           RPM_FILENAME: ${{ steps.locate_rpm.outputs.rpm_filename }}
@@ -435,14 +446,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Stage all changes
-          git add .
+          # Stage all changes including RPM files (force add to override any gitignore)
+          git add -A
+          git add -f fedora/**/*.rpm 2>/dev/null || true
           
           # Check if there are changes to commit
           if git diff --staged --quiet; then
             echo "No changes to commit"
             exit 0
           fi
+          
+          # Show what will be committed
+          echo "Files to be committed:"
+          git diff --staged --name-status
           
           # Create commit with descriptive message
           COMMIT_MSG="Publish RPM: $RPM_FILENAME to $TARGET_PATH"
