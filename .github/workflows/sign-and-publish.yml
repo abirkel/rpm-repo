@@ -1,0 +1,451 @@
+name: Sign and Publish RPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      builder_repo:
+        description: 'Builder repository (owner/repo)'
+        required: true
+        type: string
+      run_id:
+        description: 'GitHub Actions run ID containing the artifact'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Name of the artifact containing RPM'
+        required: true
+        type: string
+      distro:
+        description: 'Distribution name'
+        required: false
+        type: string
+        default: 'fedora'
+      release:
+        description: 'Release version (e.g., 43, rawhide)'
+        required: true
+        type: string
+      arch:
+        description: 'Architecture (e.g., x86_64, aarch64)'
+        required: true
+        type: string
+      build_type:
+        description: 'Build type'
+        required: false
+        type: choice
+        options:
+          - stable
+          - testing
+        default: 'stable'
+
+concurrency:
+  group: rpm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  sign-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+        continue-on-error: true
+      
+      - name: Create gh-pages branch if it doesn't exist
+        run: |
+          if ! git rev-parse --verify gh-pages >/dev/null 2>&1; then
+            echo "Creating gh-pages branch..."
+            git checkout --orphan gh-pages
+            git rm -rf . || true
+            git clean -fdx
+            echo "# RPM Repository" > README.md
+            git add README.md
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "Initialize gh-pages branch"
+            git push origin gh-pages
+          else
+            git checkout gh-pages
+          fi
+      
+      - name: Install required tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm createrepo-c gnupg2 libxml2-utils
+          
+          # Verify gh CLI is available
+          if ! command -v gh &> /dev/null; then
+            echo "::error::GitHub CLI (gh) is not available"
+            exit 1
+          fi
+          
+          echo "Installed tools:"
+          rpm --version
+          createrepo_c --version
+          gpg --version
+          gh --version
+      
+      - name: Download artifact from builder repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Downloading artifact '${{ inputs.artifact_name }}' from run ${{ inputs.run_id }} in ${{ inputs.builder_repo }}"
+          
+          # Download the artifact
+          if ! gh run download ${{ inputs.run_id }} \
+            --repo ${{ inputs.builder_repo }} \
+            --name ${{ inputs.artifact_name }} \
+            --dir ./artifact; then
+            echo "::error::Failed to download artifact '${{ inputs.artifact_name }}' from ${{ inputs.builder_repo }} run ${{ inputs.run_id }}"
+            exit 1
+          fi
+          
+          # Verify artifact directory exists and contains files
+          if [ ! -d "./artifact" ]; then
+            echo "::error::Artifact directory does not exist after download"
+            exit 1
+          fi
+          
+          if [ -z "$(ls -A ./artifact)" ]; then
+            echo "::error::Artifact directory is empty"
+            exit 1
+          fi
+          
+          echo "Artifact contents:"
+          ls -lah ./artifact
+      
+      - name: Locate RPM file
+        id: locate_rpm
+        run: |
+          # Find the first .rpm file in the artifact directory
+          RPM_FILE=$(find ./artifact -name "*.rpm" -type f | head -n 1)
+          
+          if [ -z "$RPM_FILE" ]; then
+            echo "::error::No RPM file found in artifact"
+            exit 1
+          fi
+          
+          echo "Found RPM file: $RPM_FILE"
+          echo "rpm_file=$RPM_FILE" >> $GITHUB_OUTPUT
+          
+          # Extract just the filename
+          RPM_FILENAME=$(basename "$RPM_FILE")
+          echo "rpm_filename=$RPM_FILENAME" >> $GITHUB_OUTPUT
+          
+          echo "RPM filename: $RPM_FILENAME"
+      
+      - name: Setup GPG and sign RPM
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PRIVATE_KEY_PASS: ${{ secrets.GPG_PRIVATE_KEY_PASS }}
+          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+        run: |
+          # Create GPG directory with secure permissions
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          
+          # Import GPG private key
+          echo "Importing GPG private key..."
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to import GPG private key"
+            exit 1
+          fi
+          
+          # Extract key ID from imported key
+          KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | awk '{print $2}' | cut -d'/' -f2 | head -n 1)
+          
+          if [ -z "$KEY_ID" ]; then
+            echo "::error::Failed to extract GPG key ID"
+            exit 1
+          fi
+          
+          echo "Using GPG key ID: $KEY_ID"
+          echo "key_id=$KEY_ID" >> $GITHUB_OUTPUT
+          
+          # Configure GPG for loopback pinentry mode
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          gpg-connect-agent reloadagent /bye || true
+          
+          # Create .rpmmacros file with signing configuration
+          cat > ~/.rpmmacros << EOF
+%_signature gpg
+%_gpg_name $KEY_ID
+%__gpg /usr/bin/gpg
+%_gpg_digest_algo sha256
+EOF
+          
+          # Write passphrase to secure temporary file
+          PASSPHRASE_FILE=$(mktemp)
+          chmod 600 "$PASSPHRASE_FILE"
+          echo "$GPG_PRIVATE_KEY_PASS" > "$PASSPHRASE_FILE"
+          
+          # Sign the RPM
+          echo "Signing RPM: $RPM_FILE"
+          if [ -n "$GPG_PRIVATE_KEY_PASS" ]; then
+            # Sign with passphrase
+            rpmsign --addsign \
+              --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $PASSPHRASE_FILE" \
+              "$RPM_FILE"
+          else
+            # Sign without passphrase
+            rpmsign --addsign "$RPM_FILE"
+          fi
+          
+          SIGN_RESULT=$?
+          
+          # Clean up passphrase file
+          rm -f "$PASSPHRASE_FILE"
+          
+          if [ $SIGN_RESULT -ne 0 ]; then
+            echo "::error::Failed to sign RPM"
+            exit 1
+          fi
+          
+          echo "RPM signed successfully"
+      
+      - name: Verify RPM signature
+        env:
+          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+        run: |
+          echo "Verifying signature on: $RPM_FILE"
+          
+          # Run rpm --checksig to verify the signature
+          CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
+          CHECKSIG_RESULT=$?
+          
+          echo "Signature check output:"
+          echo "$CHECKSIG_OUTPUT"
+          
+          if [ $CHECKSIG_RESULT -ne 0 ]; then
+            echo "::error::RPM signature verification failed with exit code $CHECKSIG_RESULT"
+            exit 1
+          fi
+          
+          # Check if the output contains signature information
+          if echo "$CHECKSIG_OUTPUT" | grep -q "pgp"; then
+            echo "✓ RPM signature verified successfully"
+          elif echo "$CHECKSIG_OUTPUT" | grep -q "gpg"; then
+            echo "✓ RPM signature verified successfully"
+          else
+            echo "::error::No valid signature found in RPM"
+            echo "::error::Output: $CHECKSIG_OUTPUT"
+            exit 1
+          fi
+          
+          # Additional check: ensure no "NOT OK" or similar error indicators
+          if echo "$CHECKSIG_OUTPUT" | grep -qi "not ok\|bad\|missing"; then
+            echo "::error::Signature verification indicates problems"
+            echo "::error::Output: $CHECKSIG_OUTPUT"
+            exit 1
+          fi
+          
+          echo "Signature verification completed successfully"
+      
+      - name: Publish RPM to repository
+        id: publish
+        env:
+          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+          RPM_FILENAME: ${{ steps.locate_rpm.outputs.rpm_filename }}
+        run: |
+          # Construct target directory path
+          TARGET_DIR="${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.arch }}/${{ inputs.build_type }}"
+          echo "Target directory: $TARGET_DIR"
+          
+          # Create target directory structure if it doesn't exist
+          mkdir -p "$TARGET_DIR"
+          
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "::error::Failed to create target directory: $TARGET_DIR"
+            exit 1
+          fi
+          
+          # Move signed RPM to target directory
+          echo "Moving $RPM_FILE to $TARGET_DIR/$RPM_FILENAME"
+          mv "$RPM_FILE" "$TARGET_DIR/$RPM_FILENAME"
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to move RPM to target directory"
+            exit 1
+          fi
+          
+          # Verify RPM was moved successfully
+          if [ ! -f "$TARGET_DIR/$RPM_FILENAME" ]; then
+            echo "::error::RPM file not found in target directory after move"
+            exit 1
+          fi
+          
+          echo "✓ RPM published successfully to $TARGET_DIR/$RPM_FILENAME"
+          echo "target_dir=$TARGET_DIR" >> $GITHUB_OUTPUT
+          echo "target_path=$TARGET_DIR/$RPM_FILENAME" >> $GITHUB_OUTPUT
+      
+      - name: Update repository metadata
+        env:
+          TARGET_DIR: ${{ steps.publish.outputs.target_dir }}
+        run: |
+          echo "Updating repository metadata for: $TARGET_DIR"
+          
+          # Check if repodata directory exists
+          if [ -d "$TARGET_DIR/repodata" ]; then
+            echo "Existing metadata found, performing incremental update..."
+            createrepo_c --update "$TARGET_DIR"
+          else
+            echo "No existing metadata found, creating new metadata..."
+            createrepo_c "$TARGET_DIR"
+          fi
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to generate repository metadata"
+            exit 1
+          fi
+          
+          # Validate generated repomd.xml is well-formed XML
+          REPOMD_FILE="$TARGET_DIR/repodata/repomd.xml"
+          
+          if [ ! -f "$REPOMD_FILE" ]; then
+            echo "::error::repomd.xml not found after metadata generation"
+            exit 1
+          fi
+          
+          echo "Validating repomd.xml..."
+          xmllint --noout "$REPOMD_FILE"
+          
+          if [ $? -ne 0 ]; then
+            echo "::error::repomd.xml validation failed - file is not well-formed XML"
+            exit 1
+          fi
+          
+          echo "✓ Repository metadata updated and validated successfully"
+          
+          # Display metadata info
+          echo "Generated metadata files:"
+          ls -lh "$TARGET_DIR/repodata/"
+      
+      - name: Generate HTML directory listings
+        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        with:
+          FOLDER: .
+      
+      - name: Verify HTML index generation
+        run: |
+          echo "Verifying HTML index files were generated..."
+          
+          # Check for index.html in root
+          if [ -f "index.html" ]; then
+            echo "✓ Root index.html generated"
+          else
+            echo "⚠ Warning: Root index.html not found"
+          fi
+          
+          # Check for index.html in target directory
+          TARGET_DIR="${{ steps.publish.outputs.target_dir }}"
+          if [ -f "$TARGET_DIR/index.html" ]; then
+            echo "✓ Target directory index.html generated"
+          else
+            echo "⚠ Warning: Target directory index.html not found"
+          fi
+          
+          # List all generated index.html files
+          echo "Generated index.html files:"
+          find . -name "index.html" -type f | head -20
+      
+      - name: Commit and push changes
+        env:
+          RPM_FILENAME: ${{ steps.locate_rpm.outputs.rpm_filename }}
+          TARGET_PATH: ${{ steps.publish.outputs.target_path }}
+        run: |
+          # Configure git user
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage all changes
+          git add .
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          # Create commit with descriptive message
+          COMMIT_MSG="Publish RPM: $RPM_FILENAME to $TARGET_PATH"
+          git commit -m "$COMMIT_MSG"
+          
+          echo "Commit created: $COMMIT_MSG"
+          
+          # Push to gh-pages with retry logic (3 attempts)
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          PUSH_SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Push attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES..."
+            
+            if git push origin gh-pages; then
+              PUSH_SUCCESS=true
+              echo "✓ Successfully pushed to gh-pages"
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "Push failed, attempting rebase..."
+                
+                # Fetch latest changes
+                git fetch origin gh-pages
+                
+                # Attempt to rebase on the latest gh-pages
+                if git rebase origin/gh-pages; then
+                  echo "Rebase successful, retrying push..."
+                else
+                  echo "::warning::Rebase failed, will retry push anyway..."
+                  git rebase --abort || true
+                fi
+                
+                # Exponential backoff
+                SLEEP_TIME=$((2 ** RETRY_COUNT))
+                echo "Waiting ${SLEEP_TIME}s before retry..."
+                sleep $SLEEP_TIME
+              fi
+            fi
+          done
+          
+          # Check if push was successful
+          if [ "$PUSH_SUCCESS" = false ]; then
+            echo "::error::Failed to push to gh-pages after $MAX_RETRIES attempts"
+            exit 1
+          fi
+      
+      - name: Cleanup GPG keys and temporary files
+        if: always()
+        run: |
+          echo "Cleaning up GPG keys and temporary files..."
+          
+          # Remove all GPG keys from keyring
+          for KEY_ID in $(gpg --list-secret-keys --keyid-format LONG | grep sec | awk '{print $2}' | cut -d'/' -f2); do
+            echo "Removing secret key: $KEY_ID"
+            gpg --batch --yes --delete-secret-keys "$KEY_ID" 2>/dev/null || true
+          done
+          
+          for KEY_ID in $(gpg --list-keys --keyid-format LONG | grep pub | awk '{print $2}' | cut -d'/' -f2); do
+            echo "Removing public key: $KEY_ID"
+            gpg --batch --yes --delete-keys "$KEY_ID" 2>/dev/null || true
+          done
+          
+          # Clean up GPG directory
+          rm -rf ~/.gnupg
+          
+          # Clean up .rpmmacros
+          rm -f ~/.rpmmacros
+          
+          # Clean up any remaining temporary files
+          rm -rf ./artifact
+          
+          echo "✓ Cleanup completed"
