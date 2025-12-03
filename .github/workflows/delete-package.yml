@@ -1,0 +1,435 @@
+---
+name: Delete Package
+
+'on':
+  workflow_dispatch:
+    inputs:
+      package_filename:
+        description: >
+          Full RPM filename (e.g., mypackage-1.2.3-1.fc43.x86_64.rpm).
+          Use this to delete a specific package file.
+        required: false
+        type: string
+      package_name:
+        description: >
+          Package name (e.g., mypackage).
+          Required if package_filename is not provided.
+        required: false
+        type: string
+      distro:
+        description: >
+          Distribution (e.g., fedora).
+          Required if package_filename is not provided.
+        required: false
+        type: string
+      release:
+        description: >
+          Release version (e.g., 43).
+          Required if package_filename is not provided.
+        required: false
+        type: string
+      arch:
+        description: >
+          Architecture (e.g., x86_64).
+          Required if package_filename is not provided.
+        required: false
+        type: string
+      build_type:
+        description: >
+          Build type (stable or testing).
+          Defaults to stable. Set to search_all to search all channels.
+        required: false
+        type: choice
+        options:
+          - stable
+          - testing
+          - search_all
+        default: stable
+      dry_run:
+        description: >
+          Preview changes without actually deleting (dry-run mode)
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout gh-pages branch
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      # Step 2: Validate inputs
+      - name: Validate inputs
+        id: validate
+        run: |
+          set -euo pipefail
+
+          PACKAGE_FILENAME="${{ inputs.package_filename }}"
+          PACKAGE_NAME="${{ inputs.package_name }}"
+          DISTRO="${{ inputs.distro }}"
+          RELEASE="${{ inputs.release }}"
+          ARCH="${{ inputs.arch }}"
+          BUILD_TYPE="${{ inputs.build_type }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+
+          echo "Input validation:"
+          echo "  package_filename: ${PACKAGE_FILENAME:-<empty>}"
+          echo "  package_name: ${PACKAGE_NAME:-<empty>}"
+          echo "  distro: ${DISTRO:-<empty>}"
+          echo "  release: ${RELEASE:-<empty>}"
+          echo "  arch: ${ARCH:-<empty>}"
+          echo "  build_type: $BUILD_TYPE"
+          echo "  dry_run: $DRY_RUN"
+
+          # Check if package_filename is provided
+          if [ -n "$PACKAGE_FILENAME" ]; then
+            echo "Mode: Delete specific package file"
+
+            # Validate filename format (basic check)
+            if ! [[ "$PACKAGE_FILENAME" =~ \.rpm$ ]]; then
+              echo "::error::Invalid package filename: must end with .rpm"
+              exit 1
+            fi
+
+            echo "DELETE_MODE=specific" >> $GITHUB_OUTPUT
+            echo "PACKAGE_FILENAME=$PACKAGE_FILENAME" >> $GITHUB_OUTPUT
+          else
+            echo "Mode: Delete all versions of package"
+
+            # Validate all required fields are provided
+            if [ -z "$PACKAGE_NAME" ] || [ -z "$DISTRO" ] || \
+               [ -z "$RELEASE" ] || [ -z "$ARCH" ]; then
+              echo "::error::Insufficient input for delete-all-versions mode"
+              echo "::error::Provide package_filename OR all of: package_name, distro, release, arch"
+              exit 1
+            fi
+
+            echo "DELETE_MODE=all_versions" >> $GITHUB_OUTPUT
+            echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+            echo "DISTRO=$DISTRO" >> $GITHUB_OUTPUT
+            echo "RELEASE=$RELEASE" >> $GITHUB_OUTPUT
+            echo "ARCH=$ARCH" >> $GITHUB_OUTPUT
+          fi
+
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
+          echo "DRY_RUN=$DRY_RUN" >> $GITHUB_OUTPUT
+
+      # Step 3: Install required tools
+      - name: Install required tools
+        run: |
+          set -euo pipefail
+
+          echo "Installing createrepo_c and rpmdevtools..."
+          sudo apt-get update -qq
+          sudo apt-get install -y createrepo-c rpmdevtools libxml2-utils
+
+          echo "✓ Tools installed"
+
+      # Step 4: Delete specific package file
+      - name: Delete specific package file
+        if: steps.validate.outputs.DELETE_MODE == 'specific'
+        id: delete_specific
+        run: |
+          set -euo pipefail
+
+          PACKAGE_FILENAME="${{ steps.validate.outputs.PACKAGE_FILENAME }}"
+          BUILD_TYPE="${{ steps.validate.outputs.BUILD_TYPE }}"
+          DRY_RUN="${{ steps.validate.outputs.DRY_RUN }}"
+
+          echo "Searching for package: $PACKAGE_FILENAME"
+
+          # Find the package file (no root repo/ folder)
+          if [ "$BUILD_TYPE" = "search_all" ]; then
+            echo "Searching all build types..."
+            FOUND_FILES=$(find . -name "$PACKAGE_FILENAME" -type f \
+                -not -path "./.git/*" 2>/dev/null || true)
+          else
+            echo "Searching in build_type: $BUILD_TYPE"
+            FOUND_FILES=$(find . -path "*/$BUILD_TYPE/$PACKAGE_FILENAME" \
+                -type f -not -path "./.git/*" 2>/dev/null || true)
+          fi
+
+          if [ -z "$FOUND_FILES" ]; then
+            echo "::error::Package not found: $PACKAGE_FILENAME"
+            exit 1
+          fi
+
+          # Count matches
+          FILE_COUNT=$(echo "$FOUND_FILES" | wc -l)
+
+          if [ $FILE_COUNT -gt 1 ]; then
+            echo "::warning::Multiple matches found for $PACKAGE_FILENAME:"
+            echo "$FOUND_FILES"
+            if [ "$BUILD_TYPE" != "search_all" ]; then
+              echo "::error::Use build_type=search_all to delete from multiple channels"
+              exit 1
+            fi
+          fi
+
+          PACKAGE_FILE="$FOUND_FILES"
+          echo "Found: $PACKAGE_FILE"
+
+          # Extract distro/release/arch/build_type from path
+          # Path format: ./distro/release/arch/build_type/filename
+          BUILD_TYPE_DIR=$(dirname "$PACKAGE_FILE")
+          BUILD_TYPE=$(basename "$BUILD_TYPE_DIR")
+          ARCH_DIR=$(dirname "$BUILD_TYPE_DIR")
+          ARCH=$(basename "$ARCH_DIR")
+          RELEASE_DIR=$(dirname "$ARCH_DIR")
+          RELEASE=$(basename "$RELEASE_DIR")
+          DISTRO_DIR=$(dirname "$RELEASE_DIR")
+          DISTRO=$(basename "$DISTRO_DIR")
+
+          echo "Location: $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::DRY RUN - Would delete: $PACKAGE_FILE"
+            echo "DELETED_FILES=$PACKAGE_FILE" >> $GITHUB_OUTPUT
+            echo "BUILD_TYPE_DIR=$BUILD_TYPE_DIR" >> $GITHUB_OUTPUT
+            echo "DRY_RUN_MODE=true" >> $GITHUB_OUTPUT
+          else
+            echo "Deleting: $PACKAGE_FILE"
+            rm -f "$PACKAGE_FILE"
+            echo "✓ Deleted"
+            echo "DELETED_FILES=$PACKAGE_FILE" >> $GITHUB_OUTPUT
+            echo "BUILD_TYPE_DIR=$BUILD_TYPE_DIR" >> $GITHUB_OUTPUT
+            echo "DRY_RUN_MODE=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 5: Delete all versions of package
+      - name: Delete all versions of package
+        if: steps.validate.outputs.DELETE_MODE == 'all_versions'
+        id: delete_all
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="${{ steps.validate.outputs.PACKAGE_NAME }}"
+          DISTRO="${{ steps.validate.outputs.DISTRO }}"
+          RELEASE="${{ steps.validate.outputs.RELEASE }}"
+          ARCH="${{ steps.validate.outputs.ARCH }}"
+          BUILD_TYPE="${{ steps.validate.outputs.BUILD_TYPE }}"
+          DRY_RUN="${{ steps.validate.outputs.DRY_RUN }}"
+
+          # No root repo/ folder in gh-pages
+          BUILD_TYPE_DIR="$DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+
+          echo "Searching for all versions of: $PACKAGE_NAME"
+          echo "Location: $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+
+          # Verify directory exists
+          if [ ! -d "$BUILD_TYPE_DIR" ]; then
+            echo "::error::Directory not found: $BUILD_TYPE_DIR"
+            exit 1
+          fi
+
+          # Find all RPM files for this package
+          DELETED_FILES=""
+          FILE_COUNT=0
+
+          for RPM_FILE in "$BUILD_TYPE_DIR"/*.rpm; do
+            if [ ! -f "$RPM_FILE" ]; then
+              continue
+            fi
+
+            # Extract package name from RPM
+            PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" \
+                2>/dev/null || echo "unknown")
+
+            if [ "$PKG_NAME" = "$PACKAGE_NAME" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              RPM_FILENAME=$(basename "$RPM_FILE")
+
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "  Would delete: $RPM_FILENAME"
+              else
+                echo "  Deleting: $RPM_FILENAME"
+                rm -f "$RPM_FILE"
+              fi
+
+              DELETED_FILES="$DELETED_FILES $RPM_FILE"
+            fi
+          done
+
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "::error::No packages found matching: $PACKAGE_NAME"
+            echo "::error::in $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+            exit 1
+          fi
+
+          echo "✓ Found and processed $FILE_COUNT version(s)"
+          echo "DELETED_FILES=$DELETED_FILES" >> $GITHUB_OUTPUT
+          echo "BUILD_TYPE_DIR=$BUILD_TYPE_DIR" >> $GITHUB_OUTPUT
+          echo "DRY_RUN_MODE=$DRY_RUN" >> $GITHUB_OUTPUT
+
+      # Step 6: Clean up empty directories
+      - name: Clean up empty directories
+        if: steps.validate.outputs.DRY_RUN == 'false'
+        run: |
+          set -euo pipefail
+
+          echo "Cleaning up empty directories..."
+
+          # Remove empty directories (excluding .git)
+          find . -type d -empty -not -path "./.git/*" -delete 2>/dev/null || true
+
+          echo "✓ Empty directories removed"
+
+      # Step 7: Update repository metadata
+      - name: Update repository metadata
+        if: steps.validate.outputs.DRY_RUN == 'false'
+        run: |
+          set -euo pipefail
+
+          BUILD_TYPE_DIR="${{ steps.delete_specific.outputs.BUILD_TYPE_DIR || steps.delete_all.outputs.BUILD_TYPE_DIR }}"
+
+          echo "Updating repository metadata for: $BUILD_TYPE_DIR"
+
+          # Check if directory still exists and has RPMs
+          if [ ! -d "$BUILD_TYPE_DIR" ]; then
+            echo "::notice::Directory no longer exists (all packages deleted)"
+            exit 0
+          fi
+
+          RPM_COUNT=$(find "$BUILD_TYPE_DIR" -maxdepth 1 -name "*.rpm" -type f \
+              2>/dev/null | wc -l)
+
+          if [ $RPM_COUNT -eq 0 ]; then
+            echo "::notice::No RPM files remaining in $BUILD_TYPE_DIR"
+
+            # Remove repodata if it exists
+            if [ -d "$BUILD_TYPE_DIR/repodata" ]; then
+              echo "Removing repodata directory..."
+              rm -rf "$BUILD_TYPE_DIR/repodata"
+            fi
+
+            exit 0
+          fi
+
+          echo "Regenerating metadata for $RPM_COUNT RPM(s)..."
+
+          # Run createrepo_c with update flag
+          if createrepo_c --update "$BUILD_TYPE_DIR" 2>&1; then
+            echo "✓ Metadata updated"
+          else
+            echo "::error::Failed to update metadata for $BUILD_TYPE_DIR"
+            exit 1
+          fi
+
+          # Validate generated metadata
+          if [ -f "$BUILD_TYPE_DIR/repodata/repomd.xml" ]; then
+            if xmllint --noout "$BUILD_TYPE_DIR/repodata/repomd.xml" 2>&1; then
+              echo "✓ Metadata validated"
+            else
+              echo "::error::Invalid metadata XML in $BUILD_TYPE_DIR"
+              exit 1
+            fi
+          else
+            echo "::error::Metadata file not found: $BUILD_TYPE_DIR/repodata/repomd.xml"
+            exit 1
+          fi
+
+      # Step 8: Regenerate HTML indexes
+      - name: Regenerate HTML indexes
+        if: steps.validate.outputs.DRY_RUN == 'false'
+        uses: jayanta525/github-pages-directory-listing@v4.0.0
+        with:
+          FOLDER: .
+
+      # Step 9: Commit and push changes
+      - name: Commit and push changes
+        if: steps.validate.outputs.DRY_RUN == 'false'
+        run: |
+          set -euo pipefail
+
+          DELETED_FILES="${{ steps.delete_specific.outputs.DELETED_FILES || steps.delete_all.outputs.DELETED_FILES }}"
+          DELETE_MODE="${{ steps.validate.outputs.DELETE_MODE }}"
+
+          # Configure Git user
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage all changes
+          git add .
+
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "::notice::No changes to commit"
+            exit 0
+          fi
+
+          # Build commit message
+          if [ "$DELETE_MODE" = "specific" ]; then
+            FILENAME=$(basename "$DELETED_FILES")
+            COMMIT_MSG="Deleted package: $FILENAME"
+          else
+            COMMIT_MSG="Deleted all versions of package: ${{ steps.validate.outputs.PACKAGE_NAME }}"
+          fi
+
+          echo "Changes to be committed:"
+          git diff --staged --stat
+
+          echo ""
+          echo "Commit message:"
+          echo "$COMMIT_MSG"
+
+          # Commit changes
+          if ! git commit -m "$COMMIT_MSG"; then
+            echo "::error::Failed to commit changes"
+            exit 1
+          fi
+
+          # Push to gh-pages branch with retry logic
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if git push origin gh-pages; then
+              echo "✓ Successfully pushed changes"
+              exit 0
+            fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "::warning::Push failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
+              sleep 2
+
+              # Try to pull and rebase in case of conflicts
+              if git pull --rebase origin gh-pages; then
+                echo "Rebased on latest gh-pages"
+              else
+                echo "::warning::Failed to rebase, will retry anyway"
+              fi
+            fi
+          done
+
+          echo "::error::Failed to push changes after $MAX_RETRIES attempts"
+          exit 1
+
+      # Step 10: Summary
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+
+          DRY_RUN="${{ steps.validate.outputs.DRY_RUN }}"
+          DELETE_MODE="${{ steps.validate.outputs.DELETE_MODE }}"
+
+          echo "## Deletion Summary"
+          echo ""
+          echo "**Mode**: $DELETE_MODE"
+          echo "**Dry Run**: $DRY_RUN"
+          echo ""
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "✓ Dry run completed - no changes were made"
+          else
+            echo "✓ Deletion completed successfully"
+          fi
