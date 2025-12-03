@@ -251,18 +251,18 @@ jobs:
           
           echo "✓ Public key imported successfully"
           
-          # List imported keys
+          # List imported keys (using sudo since we imported with sudo)
           echo ""
           echo "Imported RPM keys:"
-          rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{SUMMARY}\n'
+          sudo rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{SUMMARY}\n' || echo "No keys found"
           
           rm -f /tmp/public_key.asc
           
-          # Run rpm --checksig to verify the signature
+          # Run rpm --checksig to verify the signature (using sudo to access imported keys)
           echo ""
           echo "Running rpm --checksig..."
           set +e
-          CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
+          CHECKSIG_OUTPUT=$(sudo rpm --checksig "$RPM_FILE" 2>&1)
           CHECKSIG_RESULT=$?
           set -e
           
