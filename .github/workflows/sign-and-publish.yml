@@ -221,12 +221,21 @@ jobs:
           
           # Export public key and import it into RPM keyring
           echo "Importing public key into RPM keyring..."
-          gpg --export -a "$KEY_ID" | sudo rpm --import -
+          gpg --export -a "$KEY_ID" > /tmp/public_key.asc
+          
+          if [ ! -s /tmp/public_key.asc ]; then
+            echo "::error::Failed to export public key"
+            exit 1
+          fi
+          
+          sudo rpm --import /tmp/public_key.asc
           
           if [ $? -ne 0 ]; then
             echo "::error::Failed to import public key into RPM keyring"
             exit 1
           fi
+          
+          rm -f /tmp/public_key.asc
           
           # Run rpm --checksig to verify the signature
           CHECKSIG_OUTPUT=$(rpm --checksig "$RPM_FILE" 2>&1)
