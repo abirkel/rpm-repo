@@ -1,6 +1,7 @@
-[rpm-repo-stable-fedora-$releasever]
+[abirkel-rpm-stable]
 name=AB RPM Repository - Stable - Fedora $releasever - $basearch
-baseurl=https://[owner].github.io/rpm-repo/fedora/$releasever/$basearch/stable
+baseurl=https://abikel.github.io/rpm-repo/fedora/$releasever/$basearch/stable
 enabled=1
 gpgcheck=1
-gpgkey=https://[owner].github.io/rpm-repo/public.gpg
+gpgkey=https://abirkel.github.io/rpm-repo/public.gpg
+
