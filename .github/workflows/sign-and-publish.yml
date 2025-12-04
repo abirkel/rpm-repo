@@ -190,7 +190,8 @@ jobs:
           echo "$GPG_PRIVATE_KEY_PASS" > "$PASSPHRASE_FILE"
           
           # Sign all RPM files
-          echo "$RPM_FILES" | while read RPM_FILE; do
+          while IFS= read -r RPM_FILE; do
+            [ -z "$RPM_FILE" ] && continue
             echo "Signing RPM: $RPM_FILE"
             if [ -n "$GPG_PRIVATE_KEY_PASS" ]; then
               # Sign with passphrase
@@ -207,7 +208,7 @@ jobs:
               rm -f "$PASSPHRASE_FILE"
               exit 1
             fi
-          done
+          done <<< "$RPM_FILES"
           
           # Clean up passphrase file
           rm -f "$PASSPHRASE_FILE"
@@ -256,7 +257,8 @@ jobs:
           # Verify all RPM files
           echo ""
           echo "Verifying all RPM signatures..."
-          echo "$RPM_FILES" | while read RPM_FILE; do
+          while IFS= read -r RPM_FILE; do
+            [ -z "$RPM_FILE" ] && continue
             echo ""
             echo "Verifying: $RPM_FILE"
             ls -lh "$RPM_FILE"
@@ -289,7 +291,7 @@ jobs:
               echo "::error::Signature verification indicates problems for $RPM_FILE"
               exit 1
             fi
-          done
+          done <<< "$RPM_FILES"
           
           echo ""
           echo "✓ All RPM signatures verified successfully"
@@ -313,7 +315,8 @@ jobs:
           
           # Move all signed RPMs to target directory
           PUBLISHED_RPMS=""
-          echo "$RPM_FILES" | while read RPM_FILE; do
+          while IFS= read -r RPM_FILE; do
+            [ -z "$RPM_FILE" ] && continue
             RPM_FILENAME=$(basename "$RPM_FILE")
             echo "Moving $RPM_FILE to $TARGET_DIR/$RPM_FILENAME"
             mv "$RPM_FILE" "$TARGET_DIR/$RPM_FILENAME"
@@ -331,7 +334,7 @@ jobs:
             
             echo "✓ RPM published successfully to $TARGET_DIR/$RPM_FILENAME"
             PUBLISHED_RPMS="$PUBLISHED_RPMS $TARGET_DIR/$RPM_FILENAME"
-          done
+          done <<< "$RPM_FILES"
           
           echo "target_dir=$TARGET_DIR" >> $GITHUB_OUTPUT
           echo "published_rpms<<EOF" >> $GITHUB_OUTPUT
