@@ -1,5 +1,5 @@
 [abirkel-rpm-stable]
-name=AB RPM Repository - Stable - Fedora $releasever - $basearch
+name=abirkel-rpm-stable
 baseurl=https://abirkel.github.io/rpm-repo/fedora/$releasever/$basearch/stable
 enabled=1
 gpgcheck=1
