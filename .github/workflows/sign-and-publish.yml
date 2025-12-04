@@ -119,32 +119,33 @@ jobs:
           echo "Artifact contents:"
           ls -lah ./artifact
       
-      - name: Locate RPM file
-        id: locate_rpm
+      - name: Locate RPM files
+        id: locate_rpms
         run: |
-          # Find the first .rpm file in the artifact directory
-          RPM_FILE=$(find ./artifact -name "*.rpm" -type f | head -n 1)
+          # Find all .rpm files in the artifact directory
+          RPM_FILES=$(find ./artifact -name "*.rpm" -type f | sort)
           
-          if [ -z "$RPM_FILE" ]; then
-            echo "::error::No RPM file found in artifact"
+          if [ -z "$RPM_FILES" ]; then
+            echo "::error::No RPM files found in artifact"
             exit 1
           fi
           
-          echo "Found RPM file: $RPM_FILE"
-          echo "rpm_file=$RPM_FILE" >> $GITHUB_OUTPUT
+          # Count the RPMs
+          RPM_COUNT=$(echo "$RPM_FILES" | wc -l)
+          echo "Found $RPM_COUNT RPM file(s)"
+          echo "$RPM_FILES"
           
-          # Extract just the filename
-          RPM_FILENAME=$(basename "$RPM_FILE")
-          echo "rpm_filename=$RPM_FILENAME" >> $GITHUB_OUTPUT
-          
-          echo "RPM filename: $RPM_FILENAME"
+          # Store the list for later use
+          echo "rpm_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$RPM_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
       
-      - name: Setup GPG and sign RPM
+      - name: Setup GPG and sign all RPMs
         id: setup_gpg
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PRIVATE_KEY_PASS: ${{ secrets.GPG_PRIVATE_KEY_PASS }}
-          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+          RPM_FILES: ${{ steps.locate_rpms.outputs.rpm_files }}
         run: |
           # Create GPG directory with secure permissions
           mkdir -p ~/.gnupg
@@ -188,46 +189,40 @@ jobs:
           chmod 600 "$PASSPHRASE_FILE"
           echo "$GPG_PRIVATE_KEY_PASS" > "$PASSPHRASE_FILE"
           
-          # Sign the RPM
-          echo "Signing RPM: $RPM_FILE"
-          if [ -n "$GPG_PRIVATE_KEY_PASS" ]; then
-            # Sign with passphrase
-            rpmsign --addsign \
-              --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $PASSPHRASE_FILE" \
-              "$RPM_FILE"
-          else
-            # Sign without passphrase
-            rpmsign --addsign "$RPM_FILE"
-          fi
-          
-          SIGN_RESULT=$?
+          # Sign all RPM files
+          echo "$RPM_FILES" | while read RPM_FILE; do
+            echo "Signing RPM: $RPM_FILE"
+            if [ -n "$GPG_PRIVATE_KEY_PASS" ]; then
+              # Sign with passphrase
+              rpmsign --addsign \
+                --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $PASSPHRASE_FILE" \
+                "$RPM_FILE"
+            else
+              # Sign without passphrase
+              rpmsign --addsign "$RPM_FILE"
+            fi
+            
+            if [ $? -ne 0 ]; then
+              echo "::error::Failed to sign RPM: $RPM_FILE"
+              rm -f "$PASSPHRASE_FILE"
+              exit 1
+            fi
+          done
           
           # Clean up passphrase file
           rm -f "$PASSPHRASE_FILE"
           
-          if [ $SIGN_RESULT -ne 0 ]; then
-            echo "::error::Failed to sign RPM"
-            exit 1
-          fi
-          
-          echo "RPM signed successfully"
+          echo "All RPMs signed successfully"
       
-      - name: Verify RPM signature
+      - name: Verify all RPM signatures
         env:
-          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
+          RPM_FILES: ${{ steps.locate_rpms.outputs.rpm_files }}
           KEY_ID: ${{ steps.setup_gpg.outputs.key_id }}
         run: |
           echo "=== RPM Signature Verification ==="
-          echo "RPM file: $RPM_FILE"
           echo "Key ID: $KEY_ID"
           
-          # Check RPM file before verification
-          echo ""
-          echo "RPM file info:"
-          ls -lh "$RPM_FILE"
-          file "$RPM_FILE"
-          
-          # Export public key and import it into RPM keyring
+          # Export public key and import it into RPM keyring (once)
           echo ""
           echo "Exporting public key..."
           gpg --export -a "$KEY_ID" > /tmp/public_key.asc
@@ -258,53 +253,51 @@ jobs:
           
           rm -f /tmp/public_key.asc
           
-          # Run rpm --checksig to verify the signature (using sudo to access imported keys)
+          # Verify all RPM files
           echo ""
-          echo "Running rpm --checksig..."
-          set +e
-          CHECKSIG_OUTPUT=$(sudo rpm --checksig "$RPM_FILE" 2>&1)
-          CHECKSIG_RESULT=$?
-          set -e
+          echo "Verifying all RPM signatures..."
+          echo "$RPM_FILES" | while read RPM_FILE; do
+            echo ""
+            echo "Verifying: $RPM_FILE"
+            ls -lh "$RPM_FILE"
+            
+            set +e
+            CHECKSIG_OUTPUT=$(sudo rpm --checksig "$RPM_FILE" 2>&1)
+            CHECKSIG_RESULT=$?
+            set -e
+            
+            echo "Exit code: $CHECKSIG_RESULT"
+            echo "Output: $CHECKSIG_OUTPUT"
+            
+            if [ $CHECKSIG_RESULT -ne 0 ]; then
+              echo "::error::rpm --checksig failed for $RPM_FILE with exit code $CHECKSIG_RESULT"
+              exit 1
+            fi
+            
+            # Check if the output contains signature information
+            if echo "$CHECKSIG_OUTPUT" | grep -qi "signatures\? OK"; then
+              echo "✓ Signature verified"
+            elif echo "$CHECKSIG_OUTPUT" | grep -q "pgp\|gpg"; then
+              echo "✓ Signature detected"
+            else
+              echo "::error::No valid signature found in $RPM_FILE"
+              exit 1
+            fi
+            
+            # Additional check: ensure no "NOT OK" or similar error indicators
+            if echo "$CHECKSIG_OUTPUT" | grep -qi "not ok\|bad\|missing"; then
+              echo "::error::Signature verification indicates problems for $RPM_FILE"
+              exit 1
+            fi
+          done
           
-          echo "Exit code: $CHECKSIG_RESULT"
-          echo "Output:"
-          echo "$CHECKSIG_OUTPUT"
-          
-          if [ $CHECKSIG_RESULT -ne 0 ]; then
-            echo "::error::rpm --checksig failed with exit code $CHECKSIG_RESULT"
-            exit 1
-          fi
-          
-          # Check if the output contains signature information
           echo ""
-          echo "Analyzing signature output..."
-          if echo "$CHECKSIG_OUTPUT" | grep -qi "signatures\? OK"; then
-            echo "✓ RPM signature verified - output contains 'signatures OK'"
-          elif echo "$CHECKSIG_OUTPUT" | grep -q "pgp"; then
-            echo "✓ PGP signature detected"
-          elif echo "$CHECKSIG_OUTPUT" | grep -q "gpg"; then
-            echo "✓ GPG signature detected"
-          else
-            echo "::error::No valid signature found in RPM"
-            echo "::error::Expected 'signatures OK', 'pgp', or 'gpg' in output but got: $CHECKSIG_OUTPUT"
-            exit 1
-          fi
-          
-          # Additional check: ensure no "NOT OK" or similar error indicators
-          if echo "$CHECKSIG_OUTPUT" | grep -qi "not ok\|bad\|missing"; then
-            echo "::error::Signature verification indicates problems"
-            echo "::error::Output: $CHECKSIG_OUTPUT"
-            exit 1
-          fi
-          
-          echo ""
-          echo "✓ RPM signature verification completed successfully"
+          echo "✓ All RPM signatures verified successfully"
       
-      - name: Publish RPM to repository
+      - name: Publish all RPMs to repository
         id: publish
         env:
-          RPM_FILE: ${{ steps.locate_rpm.outputs.rpm_file }}
-          RPM_FILENAME: ${{ steps.locate_rpm.outputs.rpm_filename }}
+          RPM_FILES: ${{ steps.locate_rpms.outputs.rpm_files }}
         run: |
           # Construct target directory path
           TARGET_DIR="${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.arch }}/${{ inputs.build_type }}"
@@ -318,24 +311,32 @@ jobs:
             exit 1
           fi
           
-          # Move signed RPM to target directory
-          echo "Moving $RPM_FILE to $TARGET_DIR/$RPM_FILENAME"
-          mv "$RPM_FILE" "$TARGET_DIR/$RPM_FILENAME"
+          # Move all signed RPMs to target directory
+          PUBLISHED_RPMS=""
+          echo "$RPM_FILES" | while read RPM_FILE; do
+            RPM_FILENAME=$(basename "$RPM_FILE")
+            echo "Moving $RPM_FILE to $TARGET_DIR/$RPM_FILENAME"
+            mv "$RPM_FILE" "$TARGET_DIR/$RPM_FILENAME"
+            
+            if [ $? -ne 0 ]; then
+              echo "::error::Failed to move RPM to target directory: $RPM_FILE"
+              exit 1
+            fi
+            
+            # Verify RPM was moved successfully
+            if [ ! -f "$TARGET_DIR/$RPM_FILENAME" ]; then
+              echo "::error::RPM file not found in target directory after move: $RPM_FILENAME"
+              exit 1
+            fi
+            
+            echo "✓ RPM published successfully to $TARGET_DIR/$RPM_FILENAME"
+            PUBLISHED_RPMS="$PUBLISHED_RPMS $TARGET_DIR/$RPM_FILENAME"
+          done
           
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to move RPM to target directory"
-            exit 1
-          fi
-          
-          # Verify RPM was moved successfully
-          if [ ! -f "$TARGET_DIR/$RPM_FILENAME" ]; then
-            echo "::error::RPM file not found in target directory after move"
-            exit 1
-          fi
-          
-          echo "✓ RPM published successfully to $TARGET_DIR/$RPM_FILENAME"
           echo "target_dir=$TARGET_DIR" >> $GITHUB_OUTPUT
-          echo "target_path=$TARGET_DIR/$RPM_FILENAME" >> $GITHUB_OUTPUT
+          echo "published_rpms<<EOF" >> $GITHUB_OUTPUT
+          echo "$PUBLISHED_RPMS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
       
       - name: Update repository metadata
         env:
@@ -439,8 +440,7 @@ jobs:
       
       - name: Commit and push changes
         env:
-          RPM_FILENAME: ${{ steps.locate_rpm.outputs.rpm_filename }}
-          TARGET_PATH: ${{ steps.publish.outputs.target_path }}
+          PUBLISHED_RPMS: ${{ steps.publish.outputs.published_rpms }}
         run: |
           # Configure git user
           git config user.name "github-actions[bot]"
@@ -461,7 +461,8 @@ jobs:
           git diff --staged --name-status
           
           # Create commit with descriptive message
-          COMMIT_MSG="Publish RPM: $RPM_FILENAME to $TARGET_PATH"
+          RPM_COUNT=$(echo "$PUBLISHED_RPMS" | wc -w)
+          COMMIT_MSG="Publish $RPM_COUNT RPM package(s) to ${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.arch }}/${{ inputs.build_type }}"
           git commit -m "$COMMIT_MSG"
           
           echo "Commit created: $COMMIT_MSG"
