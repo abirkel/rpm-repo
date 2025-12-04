@@ -1,5 +1,5 @@
 [abirkel-rpm-testing]
-name=AB RPM Repository - Testing - Fedora $releasever - $basearch
+name=abirkel-rpm-testing
 baseurl=https://abirkel.github.io/rpm-repo/fedora/$releasever/$basearch/testing
 enabled=0
 gpgcheck=1
