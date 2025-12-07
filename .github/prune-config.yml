@@ -1,0 +1,87 @@
+---
+# Pruning Configuration for RPM Repository
+#
+# This file controls the automated pruning of old package versions and
+# distribution branches. The pruning workflow runs weekly (Sundays at 2 AM UTC)
+# to keep the repository size manageable.
+#
+# Configuration Options:
+#
+# max_branches: Maximum number of distribution branches to keep per distribution
+#   - The system will keep the latest X branches (e.g., Fedora 43, 42)
+#   - Older branches will be completely removed
+#   - Must be a positive integer (>= 1)
+#   - Default: 2
+#
+# max_versions: Maximum number of package versions to keep per package per
+#   branch per build_type (stable or testing)
+#   - Within each remaining branch and build_type, the system will keep the
+#     latest Y versions of each package
+#   - Older versions will be removed
+#   - Versions are compared using RPM version comparison (rpmdev-vercmp)
+#   - Each build_type can have different retention (e.g., stable: 5, testing: 3)
+#   - Must be a positive integer (>= 1) for each channel
+#   - Default: stable: 5, testing: 3
+#
+# Example Scenarios:
+#
+# Scenario 1: Conservative pruning (keep more history)
+#   max_branches: 3
+#   max_versions:
+#     stable: 10
+#     testing: 5
+#
+# Scenario 2: Aggressive pruning (minimize repository size)
+#   max_branches: 1
+#   max_versions:
+#     stable: 3
+#     testing: 1
+#
+# Scenario 3: Default (balanced approach)
+#   max_branches: 2
+#   max_versions:
+#     stable: 5
+#     testing: 3
+#
+# Validation:
+# - Both values must be positive integers
+# - If invalid values are provided, the workflow will fail with an error
+# - If this file is missing, the workflow will use the default values shown
+#   below
+#
+# How Pruning Works:
+#
+# 1. Branch Pruning (First Phase):
+#    - For each distribution (e.g., fedora), identify all release branches
+#    - Sort branches by version number (newest first)
+#    - Keep the latest max_branches branches
+#    - Remove all older branches entirely
+#    - Example: With max_branches=2, keep fedora/43 and fedora/42, remove
+#      fedora/41 and older
+#
+# 2. Package Version Pruning (Second Phase):
+#    - For each remaining branch and build_type, scan all packages
+#    - Group packages by name (e.g., all versions of "mypackage")
+#    - Sort versions using RPM version comparison (newest first)
+#    - Keep the latest max_versions[build_type] versions of each package
+#      within that branch and build_type
+#    - Remove older versions from that branch/build_type
+#    - Example: With max_versions.stable=5 and max_versions.testing=3,
+#      keep 5 newest stable versions and 3 newest testing versions per package
+#      per branch
+#
+# 3. Metadata Update:
+#    - After pruning, repository metadata is regenerated for all affected
+#      directories
+#    - HTML indexes are regenerated to reflect the current repository state
+#    - Changes are committed to gh-pages with a descriptive message
+#
+# Note: Pruning is per-branch and per-build_type, meaning each branch and
+# build_type maintains its own version history independently. Removing 3
+# versions from Fedora 43 stable doesn't affect Fedora 43 testing or Fedora 42.
+
+# Default Configuration
+max_branches: 2
+max_versions:
+  stable: 5
+  testing: 3
