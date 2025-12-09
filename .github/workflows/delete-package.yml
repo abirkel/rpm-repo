@@ -346,7 +346,7 @@ jobs:
       
       - name: Regenerate HTML indexes
         if: steps.validate.outputs.DRY_RUN == 'false'
-        uses: jayanta525/github-pages-directory-listing@v5.0.0
+        uses: jayanta525/github-pages-directory-listing@v4.0.0
         with:
           FOLDER: .
 
