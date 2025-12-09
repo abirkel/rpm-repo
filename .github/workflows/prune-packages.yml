@@ -7,6 +7,10 @@ name: Prune Old Packages
     - cron: '0 2 * * 0'
   workflow_dispatch:  # Allow manual triggering
 
+concurrency:
+  group: rpm-repo-modifications
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

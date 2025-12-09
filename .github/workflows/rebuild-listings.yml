@@ -8,6 +8,10 @@ on:
         required: false
         default: 'Rebuild HTML directory listings'
 
+concurrency:
+  group: rebuild-listings
+  cancel-in-progress: true
+
 jobs:
   rebuild-listings:
     runs-on: ubuntu-latest

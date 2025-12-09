@@ -38,7 +38,7 @@ on:
         default: 'stable'
 
 concurrency:
-  group: rpm-publish
+  group: rpm-publish-${{ inputs.distro }}-${{ inputs.release }}-${{ inputs.arch }}-${{ inputs.build_type }}-${{ inputs.artifact_name }}
   cancel-in-progress: false
 
 permissions:

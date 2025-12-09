@@ -52,6 +52,10 @@ name: Delete Package
         type: boolean
         default: false
 
+concurrency:
+  group: rpm-repo-modifications
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
