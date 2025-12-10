@@ -37,10 +37,6 @@ on:
           - testing
         default: 'stable'
 
-concurrency:
-  group: rpm-publish-all
-  cancel-in-progress: false
-
 permissions:
   contents: write
   actions: read
@@ -49,6 +45,15 @@ jobs:
   sign-and-publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for previous runs to complete
+        uses: softprops/turnstyle@v3
+        with:
+          poll-interval-seconds: 10
+          same-branch-only: false
+          abort-after-seconds: 3600
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Checkout gh-pages branch
         uses: actions/checkout@v4
         with:
