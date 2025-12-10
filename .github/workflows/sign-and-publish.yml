@@ -37,6 +37,10 @@ on:
           - testing
         default: 'stable'
 
+concurrency:
+  group: rpm-publish-all
+  cancel-in-progress: false
+
 permissions:
   contents: write
   actions: read
@@ -466,51 +470,12 @@ jobs:
           
           echo "Commit created: $COMMIT_MSG"
           
-          # Push to gh-pages with retry logic using pull-merge strategy (10 attempts)
-          MAX_RETRIES=10
-          RETRY_COUNT=0
-          PUSH_SUCCESS=false
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Push attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES..."
-            
-            if git push origin gh-pages; then
-              PUSH_SUCCESS=true
-              echo "✓ Successfully pushed to gh-pages"
-              break
-            else
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Push failed, pulling and merging latest changes..."
-                
-                # Fetch and merge (not rebase) to avoid corruption
-                git fetch origin gh-pages
-                
-                # Merge with strategy that prefers our changes for conflicts
-                if git merge origin/gh-pages -m "Merge remote changes" --no-edit; then
-                  echo "Merge successful, retrying push..."
-                else
-                  echo "::warning::Merge had conflicts, resolving by keeping our changes..."
-                  # For any conflicts, keep our version (the new packages)
-                  git checkout --ours .
-                  git add -A
-                  git commit -m "Resolve merge conflicts - keep new packages" --no-edit || true
-                fi
-                
-                # Exponential backoff with jitter to reduce collision probability
-                BASE_SLEEP=$((2 ** (RETRY_COUNT > 4 ? 4 : RETRY_COUNT)))
-                JITTER=$((RANDOM % 3))
-                SLEEP_TIME=$((BASE_SLEEP + JITTER))
-                echo "Waiting ${SLEEP_TIME}s before retry..."
-                sleep $SLEEP_TIME
-              fi
-            fi
-          done
-          
-          # Check if push was successful
-          if [ "$PUSH_SUCCESS" = false ]; then
-            echo "::error::Failed to push to gh-pages after $MAX_RETRIES attempts"
+          # Push to gh-pages (with concurrency control, this should always succeed)
+          echo "Pushing to gh-pages..."
+          if git push origin gh-pages; then
+            echo "✓ Successfully pushed to gh-pages"
+          else
+            echo "::error::Failed to push to gh-pages"
             exit 1
           fi
       
