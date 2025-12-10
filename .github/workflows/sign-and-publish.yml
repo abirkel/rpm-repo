@@ -37,10 +37,6 @@ on:
           - testing
         default: 'stable'
 
-concurrency:
-  group: rpm-publish-${{ inputs.distro }}-${{ inputs.release }}-${{ inputs.arch }}-${{ inputs.build_type }}
-  cancel-in-progress: false
-
 permissions:
   contents: write
   actions: read
@@ -470,8 +466,8 @@ jobs:
           
           echo "Commit created: $COMMIT_MSG"
           
-          # Push to gh-pages with retry logic (3 attempts)
-          MAX_RETRIES=3
+          # Push to gh-pages with retry logic using pull-merge strategy (10 attempts)
+          MAX_RETRIES=10
           RETRY_COUNT=0
           PUSH_SUCCESS=false
           
@@ -486,21 +482,26 @@ jobs:
               RETRY_COUNT=$((RETRY_COUNT + 1))
               
               if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Push failed, attempting rebase..."
+                echo "Push failed, pulling and merging latest changes..."
                 
-                # Fetch latest changes
+                # Fetch and merge (not rebase) to avoid corruption
                 git fetch origin gh-pages
                 
-                # Attempt to rebase on the latest gh-pages
-                if git rebase origin/gh-pages; then
-                  echo "Rebase successful, retrying push..."
+                # Merge with strategy that prefers our changes for conflicts
+                if git merge origin/gh-pages -m "Merge remote changes" --no-edit; then
+                  echo "Merge successful, retrying push..."
                 else
-                  echo "::warning::Rebase failed, will retry push anyway..."
-                  git rebase --abort || true
+                  echo "::warning::Merge had conflicts, resolving by keeping our changes..."
+                  # For any conflicts, keep our version (the new packages)
+                  git checkout --ours .
+                  git add -A
+                  git commit -m "Resolve merge conflicts - keep new packages" --no-edit || true
                 fi
                 
-                # Exponential backoff
-                SLEEP_TIME=$((2 ** RETRY_COUNT))
+                # Exponential backoff with jitter to reduce collision probability
+                BASE_SLEEP=$((2 ** (RETRY_COUNT > 4 ? 4 : RETRY_COUNT)))
+                JITTER=$((RANDOM % 3))
+                SLEEP_TIME=$((BASE_SLEEP + JITTER))
                 echo "Waiting ${SLEEP_TIME}s before retry..."
                 sleep $SLEEP_TIME
               fi
