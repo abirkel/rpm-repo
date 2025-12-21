@@ -253,41 +253,58 @@ jobs:
 
             echo "  Found ${#RPM_FILES[@]} RPM files"
 
-            # Group packages by name
+            # Group packages by name and kernel flavor (for kmod packages)
             declare -A PACKAGE_GROUPS
 
             for RPM_FILE in "${RPM_FILES[@]}"; do
               RPM_NAME=$(basename "$RPM_FILE")
 
-              # Extract package name
+              # Extract package name and release
               PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" 2>/dev/null || echo "unknown")
+              PKG_RELEASE=$(rpm -qp --queryformat '%{RELEASE}' "$RPM_FILE" 2>/dev/null || echo "0")
 
               if [ "$PKG_NAME" = "unknown" ]; then
                 echo "  ::warning::Could not determine package name for $RPM_NAME"
                 continue
               fi
 
-              # Add to group
-              if [ -z "${PACKAGE_GROUPS[$PKG_NAME]:-}" ]; then
-                PACKAGE_GROUPS[$PKG_NAME]="$RPM_FILE"
+              # For kmod packages, include kernel flavor in the grouping key
+              # This ensures packages built for different kernels are grouped separately
+              if [[ "$PKG_NAME" == kmod-* ]]; then
+                # Extract kernel flavor from release string (e.g., _300 or _ba20)
+                # Pattern: 6.17.12_300 -> extract "300"
+                KERNEL_FLAVOR=$(echo "$PKG_RELEASE" | grep -oP '\d+\.\d+\.\d+_\K[^.]+' | head -1)
+                
+                if [ -n "$KERNEL_FLAVOR" ]; then
+                  GROUP_KEY="${PKG_NAME}-${KERNEL_FLAVOR}"
+                else
+                  GROUP_KEY="${PKG_NAME}"
+                fi
               else
-                PACKAGE_GROUPS[$PKG_NAME]="${PACKAGE_GROUPS[$PKG_NAME]} $RPM_FILE"
+                GROUP_KEY="${PKG_NAME}"
+              fi
+
+              # Add to group
+              if [ -z "${PACKAGE_GROUPS[$GROUP_KEY]:-}" ]; then
+                PACKAGE_GROUPS[$GROUP_KEY]="$RPM_FILE"
+              else
+                PACKAGE_GROUPS[$GROUP_KEY]="${PACKAGE_GROUPS[$GROUP_KEY]} $RPM_FILE"
               fi
             done
 
             # Process each package group
-            for PKG_NAME in "${!PACKAGE_GROUPS[@]}"; do
+            for GROUP_KEY in "${!PACKAGE_GROUPS[@]}"; do
               # Get all versions of this package
-              PKG_FILES=(${PACKAGE_GROUPS[$PKG_NAME]})
+              PKG_FILES=(${PACKAGE_GROUPS[$GROUP_KEY]})
 
               if [ ${#PKG_FILES[@]} -le $MAX_VERSIONS ]; then
-                echo "  ✓ $PKG_NAME: ${#PKG_FILES[@]} versions (within limit)"
+                echo "  ✓ $GROUP_KEY: ${#PKG_FILES[@]} versions (within limit)"
                 continue
               fi
 
-              echo "  Processing $PKG_NAME: ${#PKG_FILES[@]} versions (limit: $MAX_VERSIONS)"
+              echo "  Processing $GROUP_KEY: ${#PKG_FILES[@]} versions (limit: $MAX_VERSIONS)"
 
-              # Sort versions using RPM version comparison
+              # Sort versions using version sort
               SORTED_FILES=()
 
               # Create a temporary file with version info
@@ -297,11 +314,11 @@ jobs:
                 echo "$VERSION $PKG_FILE" >> "$TEMP_FILE"
               done
 
-              # Sort by version (descending) and extract file paths
+              # Sort by version (descending, newest first) and extract file paths
               while IFS= read -r line; do
                 FILE_PATH=$(echo "$line" | cut -d' ' -f2-)
                 SORTED_FILES+=("$FILE_PATH")
-              done < <(sort -t' ' -k1,1V -r "$TEMP_FILE")
+              done < <(sort -k1,1Vr "$TEMP_FILE")
 
               rm -f "$TEMP_FILE"
 
