@@ -151,13 +151,14 @@ jobs:
           echo "Searching for package: $PACKAGE_FILENAME"
 
           # Find the package file (no root repo/ folder)
+          # New layout: {distro}/{release}/{build_type}/{arch}
           if [ "$BUILD_TYPE" = "search_all" ]; then
             echo "Searching all build types..."
             FOUND_FILES=$(find . -name "$PACKAGE_FILENAME" -type f \
                 -not -path "./.git/*" 2>/dev/null || true)
           else
             echo "Searching in build_type: $BUILD_TYPE"
-            FOUND_FILES=$(find . -path "*/$BUILD_TYPE/$PACKAGE_FILENAME" \
+            FOUND_FILES=$(find . -path "*/$BUILD_TYPE/*/$PACKAGE_FILENAME" \
                 -type f -not -path "./.git/*" 2>/dev/null || true)
           fi
 
@@ -181,18 +182,18 @@ jobs:
           PACKAGE_FILE="$FOUND_FILES"
           echo "Found: $PACKAGE_FILE"
 
-          # Extract distro/release/arch/build_type from path
-          # Path format: ./distro/release/arch/build_type/filename
-          BUILD_TYPE_DIR=$(dirname "$PACKAGE_FILE")
-          BUILD_TYPE=$(basename "$BUILD_TYPE_DIR")
-          ARCH_DIR=$(dirname "$BUILD_TYPE_DIR")
+          # Extract distro/release/build_type/arch from path
+          # Path format: ./distro/release/build_type/arch/filename
+          ARCH_DIR=$(dirname "$PACKAGE_FILE")
           ARCH=$(basename "$ARCH_DIR")
-          RELEASE_DIR=$(dirname "$ARCH_DIR")
+          BUILD_TYPE_DIR=$(dirname "$ARCH_DIR")
+          BUILD_TYPE=$(basename "$BUILD_TYPE_DIR")
+          RELEASE_DIR=$(dirname "$BUILD_TYPE_DIR")
           RELEASE=$(basename "$RELEASE_DIR")
           DISTRO_DIR=$(dirname "$RELEASE_DIR")
           DISTRO=$(basename "$DISTRO_DIR")
 
-          echo "Location: $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+          echo "Location: $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH"
 
           if [ "$DRY_RUN" = "true" ]; then
             echo "::notice::DRY RUN - Would delete: $PACKAGE_FILE"
@@ -240,21 +241,22 @@ jobs:
 
           # Search each build type
           for BT in "${BUILD_TYPES[@]}"; do
-            BUILD_TYPE_DIR="$DISTRO/$RELEASE/$ARCH/$BT"
+            # New layout: {distro}/{release}/{build_type}/{arch}
+            ARCH_DIR="$DISTRO/$RELEASE/$BT/$ARCH"
 
             # Skip if directory doesn't exist
-            if [ ! -d "$BUILD_TYPE_DIR" ]; then
+            if [ ! -d "$ARCH_DIR" ]; then
               echo "  Skipping $BT: directory not found"
               continue
             fi
 
             echo ""
-            echo "Searching in: $BUILD_TYPE_DIR"
+            echo "Searching in: $ARCH_DIR"
 
             # Find all RPM files for this package
             FILE_COUNT=0
 
-            for RPM_FILE in "$BUILD_TYPE_DIR"/*.rpm; do
+            for RPM_FILE in "$ARCH_DIR"/*.rpm; do
               if [ ! -f "$RPM_FILE" ]; then
                 continue
               fi
@@ -281,7 +283,8 @@ jobs:
 
             if [ $FILE_COUNT -gt 0 ]; then
               echo "  Found $FILE_COUNT version(s) in $BT"
-              AFFECTED_DIRS="$AFFECTED_DIRS $BUILD_TYPE_DIR"
+              # Store the build_type directory for metadata regeneration
+              AFFECTED_DIRS="$AFFECTED_DIRS $DISTRO/$RELEASE/$BT"
             else
               echo "  No packages found in $BT"
             fi
@@ -291,9 +294,9 @@ jobs:
             echo ""
             echo "::error::No packages found matching: $PACKAGE_NAME"
             if [ "$BUILD_TYPE" = "search_all" ]; then
-              echo "::error::in $DISTRO/$RELEASE/$ARCH (searched stable and testing)"
+              echo "::error::in $DISTRO/$RELEASE (searched stable and testing for $ARCH)"
             else
-              echo "::error::in $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE"
+              echo "::error::in $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH"
             fi
             exit 1
           fi
@@ -323,28 +326,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Get affected directories (could be multiple for search_all)
+          # Get affected directories
+          # For specific mode: extract build_type dir from arch dir
+          # For all_versions mode: already have build_type dirs
           if [ "${{ steps.validate.outputs.DELETE_MODE }}" = "specific" ]; then
-            AFFECTED_DIRS="${{ steps.delete_specific.outputs.BUILD_TYPE_DIR }}"
+            ARCH_DIR="${{ steps.delete_specific.outputs.BUILD_TYPE_DIR }}"
+            BUILD_TYPE_DIR=$(dirname "$ARCH_DIR")
+            AFFECTED_DIRS="$BUILD_TYPE_DIR"
           else
             AFFECTED_DIRS="${{ steps.delete_all.outputs.AFFECTED_DIRS }}"
           fi
 
           echo "Updating repository metadata for affected directories..."
 
-          # Process each affected directory
+          # Remove duplicates from AFFECTED_DIRS
+          AFFECTED_DIRS=$(echo "$AFFECTED_DIRS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+          # Process each affected build_type directory
           for BUILD_TYPE_DIR in $AFFECTED_DIRS; do
             echo ""
             echo "Processing: $BUILD_TYPE_DIR"
 
-            # Check if directory still exists and has RPMs
+            # Check if directory still exists and has RPMs (in any arch subdirectory)
             if [ ! -d "$BUILD_TYPE_DIR" ]; then
               echo "  Directory no longer exists (all packages deleted)"
               continue
             fi
 
-            RPM_COUNT=$(find "$BUILD_TYPE_DIR" -maxdepth 1 -name "*.rpm" -type f \
-                2>/dev/null | wc -l)
+            RPM_COUNT=$(find "$BUILD_TYPE_DIR" -name "*.rpm" -type f 2>/dev/null | wc -l)
 
             if [ $RPM_COUNT -eq 0 ]; then
               echo "  No RPM files remaining"
@@ -358,9 +367,9 @@ jobs:
               continue
             fi
 
-            echo "  Regenerating metadata for $RPM_COUNT RPM(s)..."
+            echo "  Regenerating metadata for $RPM_COUNT RPM(s) across all architectures..."
 
-            # Run createrepo_c with update flag
+            # Run createrepo_c at build_type level (covers all arch subdirectories)
             if createrepo_c --update "$BUILD_TYPE_DIR" 2>&1; then
               echo "  ✓ Metadata updated"
             else

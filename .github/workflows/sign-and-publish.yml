@@ -307,7 +307,8 @@ jobs:
           RPM_FILES: ${{ steps.locate_rpms.outputs.rpm_files }}
         run: |
           # Construct target directory path
-          TARGET_DIR="${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.arch }}/${{ inputs.build_type }}"
+          # New layout: {distro}/{release}/{build_type}/{arch}
+          TARGET_DIR="${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.build_type }}/${{ inputs.arch }}"
           echo "Target directory: $TARGET_DIR"
           
           # Create target directory structure if it doesn't exist
@@ -350,15 +351,18 @@ jobs:
         env:
           TARGET_DIR: ${{ steps.publish.outputs.target_dir }}
         run: |
-          echo "Updating repository metadata for: $TARGET_DIR"
+          # Metadata is generated at the build_type level, not arch level
+          # Extract build_type directory: {distro}/{release}/{build_type}
+          BUILD_TYPE_DIR=$(dirname "$TARGET_DIR")
+          echo "Updating repository metadata for: $BUILD_TYPE_DIR"
           
           # Check if repodata directory exists
-          if [ -d "$TARGET_DIR/repodata" ]; then
+          if [ -d "$BUILD_TYPE_DIR/repodata" ]; then
             echo "Existing metadata found, performing incremental update..."
-            createrepo_c --update "$TARGET_DIR"
+            createrepo_c --update "$BUILD_TYPE_DIR"
           else
             echo "No existing metadata found, creating new metadata..."
-            createrepo_c "$TARGET_DIR"
+            createrepo_c "$BUILD_TYPE_DIR"
           fi
           
           if [ $? -ne 0 ]; then
@@ -367,7 +371,7 @@ jobs:
           fi
           
           # Validate generated repomd.xml is well-formed XML
-          REPOMD_FILE="$TARGET_DIR/repodata/repomd.xml"
+          REPOMD_FILE="$BUILD_TYPE_DIR/repodata/repomd.xml"
           
           if [ ! -f "$REPOMD_FILE" ]; then
             echo "::error::repomd.xml not found after metadata generation"
@@ -386,7 +390,7 @@ jobs:
           
           # Display metadata info
           echo "Generated metadata files:"
-          ls -lh "$TARGET_DIR/repodata/"
+          ls -lh "$BUILD_TYPE_DIR/repodata/"
       
       - name: Clean up artifact directory
         run: |
@@ -470,7 +474,7 @@ jobs:
           
           # Create commit with descriptive message
           RPM_COUNT=$(echo "$PUBLISHED_RPMS" | wc -w)
-          COMMIT_MSG="Publish $RPM_COUNT RPM package(s) to ${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.arch }}/${{ inputs.build_type }}"
+          COMMIT_MSG="Publish $RPM_COUNT RPM package(s) to ${{ inputs.distro }}/${{ inputs.release }}/${{ inputs.build_type }}/${{ inputs.arch }}"
           git commit -m "$COMMIT_MSG"
           
           echo "Commit created: $COMMIT_MSG"

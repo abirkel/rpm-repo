@@ -22,15 +22,15 @@ This repository serves as a central hub for signing and publishing RPM packages:
 For **stable** packages (recommended):
 
 ```bash
-sudo curl -o /etc/yum.repos.d/rpm-repo.repo \
-  https://abirkel.github.io/rpm-repo/stable.repo
+sudo curl -o /etc/yum.repos.d/abirkel-stable.repo \
+  https://abirkel.github.io/rpm-repo/abirkel-stable.repo
 ```
 
 For **testing** packages:
 
 ```bash
-sudo curl -o /etc/yum.repos.d/rpm-repo-testing.repo \
-  https://abirkel.github.io/rpm-repo/testing.repo
+sudo curl -o /etc/yum.repos.d/abirkel-testing.repo \
+  https://abirkel.github.io/rpm-repo/abirkel-testing.repo
 ```
 
 ### 2. Install Packages
@@ -47,7 +47,7 @@ Visit the repository in your browser:
 https://abirkel.github.io/rpm-repo/
 ```
 
-Navigate through the directory structure to see available packages organized by distribution, release, architecture, and build type.
+Navigate through the directory structure to see available packages organized by distribution, release, build type, and architecture.
 
 ## Builder Integration
 

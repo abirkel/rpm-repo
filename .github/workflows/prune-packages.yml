@@ -215,18 +215,19 @@ jobs:
           MAX_VERSIONS_TESTING="${{ steps.config.outputs.MAX_VERSIONS_TESTING }}"
           PRUNED_PACKAGES=""
 
-          # Process each distribution/release/arch/build_type combination
-          for BUILD_TYPE_DIR in */*/*/*/; do
-            if [ ! -d "$BUILD_TYPE_DIR" ]; then
+          # Process each distribution/release/build_type/arch combination
+          # New layout: {distro}/{release}/{build_type}/{arch}
+          for ARCH_DIR in */*/*/*/; do
+            if [ ! -d "$ARCH_DIR" ]; then
               continue
             fi
 
-            # Extract distro/release/arch/build_type from path
-            BUILD_TYPE_DIR_CLEAN="${BUILD_TYPE_DIR%/}"
-            BUILD_TYPE=$(basename "$BUILD_TYPE_DIR_CLEAN")
-            ARCH_DIR=$(dirname "$BUILD_TYPE_DIR_CLEAN")
-            ARCH=$(basename "$ARCH_DIR")
-            RELEASE_DIR=$(dirname "$ARCH_DIR")
+            # Extract distro/release/build_type/arch from path
+            ARCH_DIR_CLEAN="${ARCH_DIR%/}"
+            ARCH=$(basename "$ARCH_DIR_CLEAN")
+            BUILD_TYPE_DIR=$(dirname "$ARCH_DIR_CLEAN")
+            BUILD_TYPE=$(basename "$BUILD_TYPE_DIR")
+            RELEASE_DIR=$(dirname "$BUILD_TYPE_DIR")
             RELEASE=$(basename "$RELEASE_DIR")
             DISTRO_DIR=$(dirname "$RELEASE_DIR")
             DISTRO=$(basename "$DISTRO_DIR")
@@ -241,10 +242,10 @@ jobs:
               continue
             fi
 
-            echo "Processing: $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE (max: $MAX_VERSIONS)"
+            echo "Processing: $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH (max: $MAX_VERSIONS)"
 
             # Find all RPM files
-            RPM_FILES=($(find "$BUILD_TYPE_DIR_CLEAN" -maxdepth 1 -name "*.rpm" -type f 2>/dev/null || true))
+            RPM_FILES=($(find "$ARCH_DIR_CLEAN" -maxdepth 1 -name "*.rpm" -type f 2>/dev/null || true))
 
             if [ ${#RPM_FILES[@]} -eq 0 ]; then
               echo "  No RPM files found"
@@ -332,7 +333,7 @@ jobs:
                 else
                   echo "    ✗ Removing: $FILE_NAME"
                   rm -f "$FILE"
-                  PRUNED_PACKAGES="$PRUNED_PACKAGES $DISTRO/$RELEASE/$ARCH/$BUILD_TYPE/$FILE_NAME"
+                  PRUNED_PACKAGES="$PRUNED_PACKAGES $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH/$FILE_NAME"
                 fi
               done
             done
@@ -359,43 +360,57 @@ jobs:
           echo "Updating repository metadata..."
 
           # Update metadata for all remaining build_type directories
-          for BUILD_TYPE_DIR in */*/*/*/; do
-            if [ ! -d "$BUILD_TYPE_DIR" ]; then
+          # New layout: metadata at {distro}/{release}/{build_type} level
+          # Process unique build_type directories (not arch subdirectories)
+          PROCESSED_DIRS=""
+          
+          for ARCH_DIR in */*/*/*/; do
+            if [ ! -d "$ARCH_DIR" ]; then
               continue
             fi
 
-            BUILD_TYPE_DIR_CLEAN="${BUILD_TYPE_DIR%/}"
+            # Extract build_type directory
+            ARCH_DIR_CLEAN="${ARCH_DIR%/}"
+            BUILD_TYPE_DIR=$(dirname "$ARCH_DIR_CLEAN")
 
-            # Check if directory has any RPM files
-            RPM_COUNT=$(find "$BUILD_TYPE_DIR_CLEAN" -maxdepth 1 -name "*.rpm" -type f 2>/dev/null | wc -l)
+            # Skip if already processed
+            if echo "$PROCESSED_DIRS" | grep -q "^$BUILD_TYPE_DIR$"; then
+              continue
+            fi
+
+            # Check if directory has any RPM files (in any arch subdirectory)
+            RPM_COUNT=$(find "$BUILD_TYPE_DIR" -name "*.rpm" -type f 2>/dev/null | wc -l)
 
             if [ $RPM_COUNT -eq 0 ]; then
-              echo "  Skipping $BUILD_TYPE_DIR_CLEAN (no RPM files)"
+              echo "  Skipping $BUILD_TYPE_DIR (no RPM files)"
               continue
             fi
 
-            echo "  Updating metadata: $BUILD_TYPE_DIR_CLEAN"
+            echo "  Updating metadata: $BUILD_TYPE_DIR"
 
-            # Run createrepo_c
-            if createrepo_c --update "$BUILD_TYPE_DIR_CLEAN" 2>&1; then
+            # Run createrepo_c at build_type level
+            if createrepo_c --update "$BUILD_TYPE_DIR" 2>&1; then
               echo "    ✓ Metadata updated"
             else
-              echo "::error::Failed to update metadata for $BUILD_TYPE_DIR_CLEAN"
+              echo "::error::Failed to update metadata for $BUILD_TYPE_DIR"
               exit 1
             fi
 
             # Validate generated metadata
-            if [ -f "$BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml" ]; then
-              if xmllint --noout "$BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml" 2>&1; then
+            if [ -f "$BUILD_TYPE_DIR/repodata/repomd.xml" ]; then
+              if xmllint --noout "$BUILD_TYPE_DIR/repodata/repomd.xml" 2>&1; then
                 echo "    ✓ Metadata validated"
               else
-                echo "::error::Invalid metadata XML in $BUILD_TYPE_DIR_CLEAN"
+                echo "::error::Invalid metadata XML in $BUILD_TYPE_DIR"
                 exit 1
               fi
             else
-              echo "::error::Metadata file not found: $BUILD_TYPE_DIR_CLEAN/repodata/repomd.xml"
+              echo "::error::Metadata file not found: $BUILD_TYPE_DIR/repodata/repomd.xml"
               exit 1
             fi
+
+            # Mark as processed
+            PROCESSED_DIRS="$PROCESSED_DIRS"$'\n'"$BUILD_TYPE_DIR"
           done
 
           echo "✓ All metadata updated and validated"

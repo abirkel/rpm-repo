@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Initialize repository configuration files on gh-pages branch
-# This script replaces [owner] placeholder with actual GitHub username
+# This script deploys .repo files and public GPG key to gh-pages
 
 echo "Initializing repository configuration files..."
 
@@ -29,40 +29,45 @@ if [ "$CURRENT_BRANCH" != "gh-pages" ]; then
 fi
 
 # Check if template files exist in main branch
-if [ ! -f "repo/stable.repo" ] || [ ! -f "repo/testing.repo" ]; then
+if [ ! -f "repo/abirkel-stable.repo" ] || [ ! -f "repo/abirkel-testing.repo" ]; then
     echo "Error: Template files not found in repo/ directory"
     echo "Make sure you have checked out the necessary files from main branch"
     exit 1
 fi
 
-# Process stable.repo
-echo "Processing stable.repo..."
-sed "s/\[owner\]/$OWNER/g" repo/stable.repo > stable.repo
-if [ ! -f "stable.repo" ]; then
-    echo "Error: Failed to create stable.repo"
+# Copy .repo files to gh-pages root
+echo "Copying abirkel-stable.repo..."
+cp repo/abirkel-stable.repo abirkel-stable.repo
+if [ ! -f "abirkel-stable.repo" ]; then
+    echo "Error: Failed to copy abirkel-stable.repo"
     exit 1
 fi
-echo "Created stable.repo"
+echo "Created abirkel-stable.repo"
 
-# Process testing.repo
-echo "Processing testing.repo..."
-sed "s/\[owner\]/$OWNER/g" repo/testing.repo > testing.repo
-if [ ! -f "testing.repo" ]; then
-    echo "Error: Failed to create testing.repo"
+echo "Copying abirkel-testing.repo..."
+cp repo/abirkel-testing.repo abirkel-testing.repo
+if [ ! -f "abirkel-testing.repo" ]; then
+    echo "Error: Failed to copy abirkel-testing.repo"
     exit 1
 fi
-echo "Created testing.repo"
+echo "Created abirkel-testing.repo"
 
-# Verify placeholder replacement
-if grep -q "\[owner\]" stable.repo testing.repo; then
-    echo "Error: Placeholder [owner] still present in output files"
-    exit 1
+# Copy public GPG key if it exists
+if [ -f "repo/public.gpg" ]; then
+    echo "Copying public.gpg..."
+    cp repo/public.gpg public.gpg
+    echo "Created public.gpg"
+else
+    echo "Warning: public.gpg not found in repo/ directory"
 fi
 
 echo "Successfully initialized repository configuration files"
 echo "Files created:"
-echo "  - stable.repo"
-echo "  - testing.repo"
+echo "  - abirkel-stable.repo"
+echo "  - abirkel-testing.repo"
+if [ -f "public.gpg" ]; then
+    echo "  - public.gpg"
+fi
 echo ""
 echo "Next steps:"
 echo "  1. Verify the files contain correct URLs"

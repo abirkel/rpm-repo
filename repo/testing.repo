@@ -1,6 +1,0 @@
-[abirkel-rpm-testing]
-name=abirkel-rpm-testing
-baseurl=https://abirkel.github.io/rpm-repo/fedora/$releasever/$basearch/testing
-enabled=0
-gpgcheck=1
-gpgkey=https://abirkel.github.io/rpm-repo/public.gpg
