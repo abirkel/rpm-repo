@@ -261,8 +261,8 @@ jobs:
               RPM_NAME=$(basename "$RPM_FILE")
 
               # Extract package name and release
-              PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" 2>/dev/null || echo "unknown")
-              PKG_RELEASE=$(rpm -qp --queryformat '%{RELEASE}' "$RPM_FILE" 2>/dev/null || echo "0")
+              PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" || echo "unknown")
+              PKG_RELEASE=$(rpm -qp --queryformat '%{RELEASE}' "$RPM_FILE" || echo "0")
 
               if [ "$PKG_NAME" = "unknown" ]; then
                 echo "  ::warning::Could not determine package name for $RPM_NAME"
@@ -311,7 +311,7 @@ jobs:
               # Create a temporary file with version info
               TEMP_FILE=$(mktemp)
               for PKG_FILE in "${PKG_FILES[@]}"; do
-                VERSION=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$PKG_FILE" 2>/dev/null || echo "0-0")
+                VERSION=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$PKG_FILE" || echo "0-0")
                 echo "$VERSION $PKG_FILE" >> "$TEMP_FILE"
               done
 
