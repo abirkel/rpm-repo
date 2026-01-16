@@ -1,7 +1,0 @@
-[abirkel-rpm-stable]
-name=abirkel-rpm-stable
-baseurl=https://abirkel.github.io/rpm-repo/fedora/$releasever/$basearch/stable
-enabled=1
-gpgcheck=1
-gpgkey=https://abirkel.github.io/rpm-repo/public.gpg
-
