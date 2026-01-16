@@ -25,6 +25,67 @@ jobs:
           ref: gh-pages
           fetch-depth: 1
       
+      - name: Install required tools
+        run: |
+          sudo apt-get update -qq || true
+          sudo apt-get install -y createrepo-c libxml2-utils
+          echo "✓ Tools installed"
+      
+      - name: Generate repository metadata
+        run: |
+          echo "Generating repository metadata for all build_type directories..."
+          
+          # Find all unique build_type directories and regenerate metadata
+          PROCESSED_DIRS=""
+          
+          for ARCH_DIR in fedora/*/*/*/; do
+            if [ ! -d "$ARCH_DIR" ]; then
+              continue
+            fi
+            
+            # Extract build_type directory
+            ARCH_DIR_CLEAN="${ARCH_DIR%/}"
+            BUILD_TYPE_DIR=$(dirname "$ARCH_DIR_CLEAN")
+            
+            # Skip if already processed
+            if echo "$PROCESSED_DIRS" | grep -q "^$BUILD_TYPE_DIR$"; then
+              continue
+            fi
+            
+            # Check if directory has any RPM files
+            RPM_COUNT=$(find "$BUILD_TYPE_DIR" -name "*.rpm" -type f 2>/dev/null | wc -l)
+            
+            if [ $RPM_COUNT -eq 0 ]; then
+              echo "  Skipping $BUILD_TYPE_DIR (no RPM files)"
+              continue
+            fi
+            
+            echo "  Generating metadata for: $BUILD_TYPE_DIR ($RPM_COUNT RPMs)"
+            
+            # Run createrepo_c
+            if createrepo_c --update "$BUILD_TYPE_DIR" 2>&1; then
+              echo "    ✓ Metadata generated"
+            else
+              echo "    ✗ Failed to generate metadata"
+              exit 1
+            fi
+            
+            # Validate metadata
+            if [ -f "$BUILD_TYPE_DIR/repodata/repomd.xml" ]; then
+              if xmllint --noout "$BUILD_TYPE_DIR/repodata/repomd.xml" 2>&1; then
+                echo "    ✓ Metadata validated"
+              else
+                echo "    ✗ Invalid metadata XML"
+                exit 1
+              fi
+            fi
+            
+            # Mark as processed
+            PROCESSED_DIRS="$PROCESSED_DIRS"$'\n'"$BUILD_TYPE_DIR"
+          done
+          
+          echo "✓ All metadata generated successfully"
+      
       - name: Prepare for HTML generation
         run: |
           echo "Hiding .git directory temporarily..."
