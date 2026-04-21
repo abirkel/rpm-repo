@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: gh-pages
-          fetch-depth: 0  # Need full history for proper version comparison
+          fetch-depth: 0  # Need full history for git log timestamp lookups
 
       # Step 2: Sparse checkout of prune-config.yml from main branch
       - name: Fetch prune configuration from main branch
@@ -130,8 +130,11 @@ jobs:
           MAX_BRANCHES="${{ steps.config.outputs.MAX_BRANCHES }}"
           PRUNED_BRANCHES=""
 
-          # Find all distributions (no root repo/ folder)
-          DISTROS=($(find . -mindepth 1 -maxdepth 1 -type d -not -name ".*" -not -name "*.repo" -not -name "*.gpg" 2>/dev/null | sed 's|^\./||' || true))
+          # Find all distributions (exclude hidden dirs and the repo/ dir)
+          DISTROS=($(find . -mindepth 1 -maxdepth 1 -type d \
+            -not -name ".*" \
+            -not -name "repo" \
+            2>/dev/null | sed 's|^\./||' || true))
 
           if [ ${#DISTROS[@]} -eq 0 ]; then
             echo "::warning::No distribution directories found, nothing to prune"
@@ -216,7 +219,7 @@ jobs:
           PRUNED_PACKAGES=""
 
           # Process each distribution/release/build_type/arch combination
-          # New layout: {distro}/{release}/{build_type}/{arch}
+          # Layout: {distro}/{release}/{build_type}/{arch}
           for ARCH_DIR in */*/*/*/; do
             if [ ! -d "$ARCH_DIR" ]; then
               continue
@@ -254,48 +257,26 @@ jobs:
 
             echo "  Found ${#RPM_FILES[@]} RPM files"
 
-            # Group packages by name and kernel flavor (for kmod packages)
+            # Group packages by their RPM NAME field.
+            # Fix: redirect rpm stderr to /dev/null to prevent signature
+            # warnings (e.g. NOKEY) from polluting the captured package name.
             declare -A PACKAGE_GROUPS
 
             for RPM_FILE in "${RPM_FILES[@]}"; do
               RPM_NAME=$(basename "$RPM_FILE")
 
-              # Extract package name and release
-              PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" 2>&1)
-              RPM_QUERY_EXIT=$?
-
-              if [ $RPM_QUERY_EXIT -ne 0 ]; then
-                echo "::error::Failed to query RPM package: $RPM_NAME"
-                echo "::error::RPM query output: $PKG_NAME"
+              # Query package name; suppress stderr (NOKEY warnings etc.)
+              if ! PKG_NAME=$(rpm -qp --queryformat '%{NAME}' "$RPM_FILE" 2>/dev/null); then
+                echo "::error::Failed to query RPM package name: $RPM_NAME"
                 exit 1
               fi
 
-              PKG_RELEASE=$(rpm -qp --queryformat '%{RELEASE}' "$RPM_FILE" 2>&1)
-              RPM_QUERY_EXIT=$?
-
-              if [ $RPM_QUERY_EXIT -ne 0 ]; then
-                echo "::error::Failed to query RPM release: $RPM_NAME"
-                echo "::error::RPM query output: $PKG_RELEASE"
-                exit 1
-              fi
-
-              # For kmod packages, include kernel flavor in the grouping key
-              # This ensures packages built for different kernels are grouped separately
-              if [[ "$PKG_NAME" == kmod-* ]]; then
-                # Extract kernel flavor from package NAME (e.g., kmod-yeetmouse-6.17.12-300.fc43.x86_64)
-                # Pattern: kmod-name-X.X.X-flavor -> extract "flavor" (e.g., 300, ba20, ba22)
-                KERNEL_FLAVOR=$(echo "$PKG_NAME" | grep -oP '\d+\.\d+\.\d+-\K[^.]+' | head -1 || true)
-                
-                if [ -n "$KERNEL_FLAVOR" ]; then
-                  GROUP_KEY="${PKG_NAME}-${KERNEL_FLAVOR}"
-                else
-                  # If no kernel flavor found, just use the full package name
-                  GROUP_KEY="${PKG_NAME}"
-                fi
-              else
-                # Regular packages: group by package name only
-                GROUP_KEY="${PKG_NAME}"
-              fi
+              # Use the full RPM NAME as the group key.
+              # For kmod packages the NAME already encodes the kernel version
+              # (e.g. kmod-yeetmouse-6.17.7-ba25.fc43.x86_64), so each
+              # kernel variant is naturally its own group — which is correct:
+              # we keep the N most recent builds of each kernel variant.
+              GROUP_KEY="${PKG_NAME}"
 
               # Add to group
               if [ -z "${PACKAGE_GROUPS[$GROUP_KEY]:-}" ]; then
@@ -307,55 +288,97 @@ jobs:
 
             # Process each package group
             for GROUP_KEY in "${!PACKAGE_GROUPS[@]}"; do
-              # Get all versions of this package
+              # Get all files belonging to this package name
               PKG_FILES=(${PACKAGE_GROUPS[$GROUP_KEY]})
 
-              if [ ${#PKG_FILES[@]} -le $MAX_VERSIONS ]; then
-                echo "  ✓ $GROUP_KEY: ${#PKG_FILES[@]} versions (within limit)"
-                continue
-              fi
+              # Group files into "builds": one build = one VERSION-RELEASE
+              # value, which may include both a binary .rpm and a .src.rpm.
+              # Using rpm's own VERSION-RELEASE as the key is unambiguous and
+              # avoids fragile filename parsing.
+              declare -A BUILD_FILES   # build_key -> "file1 file2 ..."
+              declare -A BUILD_TS      # build_key -> commit timestamp
 
-              echo "  Processing $GROUP_KEY: ${#PKG_FILES[@]} versions (limit: $MAX_VERSIONS)"
-
-              # Sort versions using version sort
-              SORTED_FILES=()
-
-              # Create a temporary file with version info
-              TEMP_FILE=$(mktemp)
               for PKG_FILE in "${PKG_FILES[@]}"; do
-                VERSION=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' "$PKG_FILE" 2>&1)
-                RPM_QUERY_EXIT=$?
+                FNAME=$(basename "$PKG_FILE")
 
-                if [ $RPM_QUERY_EXIT -ne 0 ]; then
-                  echo "::error::Failed to query RPM version: $(basename "$PKG_FILE")"
-                  echo "::error::RPM query output: $VERSION"
+                # Get VERSION-RELEASE; stderr suppressed (NOKEY warnings)
+                if ! VR=$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}' \
+                    "$PKG_FILE" 2>/dev/null); then
+                  echo "::error::Failed to query version for $FNAME"
                   exit 1
                 fi
 
-                echo "$VERSION $PKG_FILE" >> "$TEMP_FILE"
+                BUILD_KEY="$VR"
+
+                if [ -z "${BUILD_FILES[$BUILD_KEY]:-}" ]; then
+                  BUILD_FILES[$BUILD_KEY]="$PKG_FILE"
+                else
+                  BUILD_FILES[$BUILD_KEY]="${BUILD_FILES[$BUILD_KEY]} $PKG_FILE"
+                fi
+
+                # Use the binary RPM's commit timestamp as the canonical time
+                # for this build. src RPMs are often added in a batch commit
+                # and share an old timestamp, so the binary timestamp is more
+                # representative of when the build was actually published.
+                if [[ "$FNAME" != *.src.rpm ]]; then
+                  TS=$(git log --diff-filter=A --follow --format="%ct" \
+                    -- "$PKG_FILE" 2>/dev/null | tail -1)
+                  BUILD_TS[$BUILD_KEY]="${TS:-0}"
+                fi
               done
 
-              # Sort by version (descending, newest first) and extract file paths
+              # Fill in timestamp for any build that only has a src RPM
+              for BUILD_KEY in "${!BUILD_FILES[@]}"; do
+                if [ -z "${BUILD_TS[$BUILD_KEY]:-}" ]; then
+                  for PKG_FILE in ${BUILD_FILES[$BUILD_KEY]}; do
+                    TS=$(git log --diff-filter=A --follow --format="%ct" \
+                      -- "$PKG_FILE" 2>/dev/null | tail -1)
+                    BUILD_TS[$BUILD_KEY]="${TS:-0}"
+                    break
+                  done
+                fi
+              done
+
+              BUILD_COUNT=${#BUILD_FILES[@]}
+
+              if [ "$BUILD_COUNT" -le "$MAX_VERSIONS" ]; then
+                echo "  ✓ $GROUP_KEY: $BUILD_COUNT builds (within limit)"
+                unset BUILD_FILES BUILD_TS
+                continue
+              fi
+
+              echo "  Processing $GROUP_KEY: $BUILD_COUNT builds (limit: $MAX_VERSIONS)"
+
+              # Sort builds by timestamp descending (newest first)
+              TEMP_FILE=$(mktemp)
+              for BUILD_KEY in "${!BUILD_TS[@]}"; do
+                echo "${BUILD_TS[$BUILD_KEY]} $BUILD_KEY" >> "$TEMP_FILE"
+              done
+
+              # Collect the build keys to keep (newest N)
+              declare -A KEEP_BUILDS
               while IFS= read -r line; do
-                FILE_PATH=$(echo "$line" | cut -d' ' -f2-)
-                SORTED_FILES+=("$FILE_PATH")
-              done < <(sort -k1,1Vr "$TEMP_FILE")
+                BUILD_KEY="${line#* }"
+                KEEP_BUILDS[$BUILD_KEY]=1
+              done < <(sort -k1,1rn "$TEMP_FILE" | head -"$MAX_VERSIONS")
 
               rm -f "$TEMP_FILE"
 
-              # Keep only MAX_VERSIONS newest versions
-              for i in "${!SORTED_FILES[@]}"; do
-                FILE="${SORTED_FILES[$i]}"
-                FILE_NAME=$(basename "$FILE")
-
-                if [ $i -lt $MAX_VERSIONS ]; then
-                  echo "    ✓ Keeping: $FILE_NAME"
-                else
-                  echo "    ✗ Removing: $FILE_NAME"
-                  rm -f "$FILE"
-                  PRUNED_PACKAGES="$PRUNED_PACKAGES $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH/$FILE_NAME"
-                fi
+              # Keep or remove all files belonging to each build
+              for BUILD_KEY in "${!BUILD_FILES[@]}"; do
+                for PKG_FILE in ${BUILD_FILES[$BUILD_KEY]}; do
+                  FILE_NAME=$(basename "$PKG_FILE")
+                  if [ -n "${KEEP_BUILDS[$BUILD_KEY]:-}" ]; then
+                    echo "    ✓ Keeping: $FILE_NAME"
+                  else
+                    echo "    ✗ Removing: $FILE_NAME"
+                    rm -f "$PKG_FILE"
+                    PRUNED_PACKAGES="$PRUNED_PACKAGES $DISTRO/$RELEASE/$BUILD_TYPE/$ARCH/$FILE_NAME"
+                  fi
+                done
               done
+
+              unset BUILD_FILES BUILD_TS KEEP_BUILDS
             done
 
             # Clean up associative array for next iteration
@@ -383,7 +406,7 @@ jobs:
           # New layout: metadata at {distro}/{release}/{build_type} level
           # Process unique build_type directories (not arch subdirectories)
           PROCESSED_DIRS=""
-          
+
           for ARCH_DIR in */*/*/*/; do
             if [ ! -d "$ARCH_DIR" ]; then
               continue
@@ -441,7 +464,7 @@ jobs:
           echo "Removing existing index.html files to force regeneration..."
           find . -name "index.html" -type f -delete
           echo "✓ Old index.html files removed"
-      
+
       - name: Regenerate HTML indexes
         uses: jayanta525/github-pages-directory-listing@v4.0.0
         with:
